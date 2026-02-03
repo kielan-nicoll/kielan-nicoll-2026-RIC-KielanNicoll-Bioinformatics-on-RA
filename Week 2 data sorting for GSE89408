@@ -1,0 +1,181 @@
+
+# setting my work directory to proper location
+setwd("C:/Users/kris_/OneDrive/Desktop/school stuff/R/GSE89408")
+getwd()
+# [1] "C:/Users/kris_/OneDrive/Desktop/school stuff/R/GSE89408"
+
+# loading my libraries
+library(GEOquery)
+library(limma)
+
+# loading environment to skip other steps, go to line 174 to see results that 
+# matter.
+load("C:/Users/kris_/OneDrive/Desktop/school stuff/R/First attempt.RData")
+
+# with libraries loaded I now load GSE89408 and its supplementary
+# files. I also check to make sure they are proper.
+gse <- getGEO("GSE89408", GSEMatrix = TRUE)
+names(gse)
+getGEOSuppFiles("GSE89408")
+list.files("GSE89408")
+
+# checking data
+length(gse)
+
+library(readr)
+
+exprs_raw <- read_tsv("GSE89408_GEO_count_matrix_rename.txt.gz")
+
+# New names:                                                           
+# • `` -> `...1`
+# Rows: 25049 Columns: 219
+# ── Column specification ───────────────────────────────────────────────
+# Delimiter: "\t"
+# chr   (1): ...1
+# dbl (218): normal_tissue_1, normal_tissue_2, normal_tissue_3, norma...
+
+# ℹ Use `spec()` to retrieve the full column specification for this data.
+# ℹ Specify the column types or set `show_col_types = FALSE` to quiet this message.
+
+head(exprs_raw)
+
+# # A tibble: 6 × 219
+# ...1  normal_tissue_1 normal_tissue_2 normal_tissue_3 normal_tissue_4
+# <chr>           <dbl>           <dbl>           <dbl>           <dbl>
+#   1 5S_r…             0               0               0               0  
+# 2 7SK             473.            898.           1128.            442. 
+# 3 7SK:…            17.4            37.0            89.3            27.2
+# 4 A1BG             45              15              19              29  
+# 5 A1BG…            96              13              25              99  
+# 6 A1CF              0               1               0               0  
+# ℹ 214 more variables: normal_tissue_5 <dbl>, normal_tissue_6 <dbl>,
+#   normal_tissue_7 <dbl>, normal_tissue_8 <dbl>,
+#   normal_tissue_9 <dbl>, normal_tissue_10 <dbl>,
+#   normal_tissue_11 <dbl>, normal_tissue_12 <dbl>,
+#   normal_tissue_13 <dbl>, normal_tissue_14 <dbl>,
+#   normal_tissue_15 <dbl>, normal_tissue_16 <dbl>,
+#   normal_tissue_17 <dbl>, normal_tissue_18 <dbl>, …
+# ℹ Use `colnames()` to see all variable names
+
+colnames(exprs_raw)[1:6]
+# [1] "...1"            "normal_tissue_1" "normal_tissue_2" "normal_tissue_3" 
+# "normal_tissue_4" "normal_tissue_5"
+
+
+eset <- gse[[1]]
+eset
+
+# ExpressionSet (storageMode: lockedEnvironment)
+# assayData: 0 features, 218 samples 
+# element names: exprs 
+# protocolData: none
+# phenoData
+# sampleNames: GSM2370970 GSM2370971 ... GSM2371187 (218
+#                                                    total)
+# varLabels: title geo_accession ... Sex:ch1 (46 total)
+# varMetadata: labelDescription
+# featureData: none
+# experimentData: use 'experimentData(object)'
+# pubMedIds: 28455435
+# 28863153 
+# Annotation: GPL11154 
+
+# !GPL1154!
+
+# extracting expression matrix
+probe_ids <- exprs_raw[[1]]               
+exprs_mat <- as.matrix(exprs_raw[,-1])
+
+exprs_mat <- apply(exprs_mat, 2, as.numeric)
+rownames(exprs_mat) <- probe_ids
+
+exprs_mat[1:5,1:5]
+
+# normal_tissue_1 normal_tissue_2 normal_tissue_3
+# 5S_rRNA                        0.00            0.00             0.0
+# 7SK                          472.59          897.97          1127.7
+# 7SK:ENSG00000260682           17.41           37.03            89.3
+# A1BG                          45.00           15.00            19.0
+# A1BG-AS1                      96.00           13.00            25.0
+# normal_tissue_4 normal_tissue_5
+# 5S_rRNA                         0.0             0.0
+# 7SK                           441.8           363.9
+# 7SK:ENSG00000260682            27.2            78.1
+# A1BG                           29.0            32.0
+# A1BG-AS1                       99.0            80.0
+
+# subseting sample metadata
+pheno <- pData(eset)
+
+# checking for "sex" in metadata
+grep("Sex", colnames(pheno), ignore.case = TRUE, value = TRUE)
+# [1] "Sex:ch1", inspecting metadata
+
+# inspecting sex metadata
+table(pheno$Sex)
+#   F   M 
+#  146  72 
+
+# now inspecting disease metadata
+table(pheno$disease)
+
+#                         Arthralgia                             Normal 
+#                                 10                                 28 
+#                     Osteoarthritis       Rheumatoid arthritis (early) 
+#                                 22                                 57 
+# Rheumatoid arthritis (established)         Undifferentiated arthritis 
+#                                 95                                  6 
+
+# seeing what expression values look like
+summary(exprs_mat)
+
+# normal_tissue_1   normal_tissue_2    normal_tissue_3   normal_tissue_4  
+# Min.   :      0   Min.   :       0   Min.   :      0   Min.   :      0  
+# 1st Qu.:      3   1st Qu.:       3   1st Qu.:      5   1st Qu.:      3  
+# Median :     90   Median :      70   Median :    132   Median :     99  
+# Mean   :   1591   Mean   :    1873   Mean   :   1349   Mean   :   1430
+
+# Log2 transforming data to make data more usable.
+exprs_mat_log <- log2(exprs_mat + 1)
+summary(exprs_mat_log)
+
+# normal_tissue_1  normal_tissue_2  normal_tissue_3  normal_tissue_4 
+# Min.   : 0.000   Min.   : 0.000   Min.   : 0.000   Min.   : 0.000  
+# 1st Qu.: 2.000   1st Qu.: 2.000   1st Qu.: 2.585   1st Qu.: 2.000  
+# Median : 6.508   Median : 6.150   Median : 7.055   Median : 6.644  
+# Mean   : 5.787   Mean   : 5.677   Mean   : 6.313   Mean   : 5.911  
+
+# Visualizing data to confirm log2 went well
+boxplot(exprs_mat_log[, 1:20], outline = FALSE, las = 2)
+# data looks pretty well normal, some samples are a little off
+# but the vast majority look usable.
+
+# checking for any missing values, and assessing phenotype data
+sum(is.na(exprs_mat))
+# [1] 0, this means no missing values.
+
+head(pheno, 3)
+# this show all metadata for each sample.
+
+colnames(pheno)
+# [43] "acpa positivity:ch1"     "age:ch1"    "disease:ch1"        "Sex:ch1"
+unique(pheno$characteristics_ch1)
+# [1] "Sex: M" "Sex: F", this and the line above show that metadata contains
+# sex stratification, as well as disease groups.
+unique(pheno$characteristics_ch1.2)
+# [1] "disease: Normal"                      "disease: Osteoarthritis"                "disease: Arthralgia"                        
+# [4] "disease: Undifferentiated arthritis"  "disease: Rheumatoid arthritis (early)"  "disease: Rheumatoid arthritis (established)"
+
+# data looks good. Making groups by substituting sex and disease groups
+pheno$disease <- sub("disease: ", "", pheno$characteristics_ch1.2)
+pheno$Sex <- sub("Sex: ", "", pheno$characteristics_ch1)
+
+pheno$group <- paste(pheno$`Sex:ch1`, pheno$`disease:ch1`, sep = "_")
+table(pheno$group)
+
+# F_Arthralgia                             F_Normal                        F_Osteoarthritis       F_Rheumatoid arthritis (early) 
+# 8                                        14                              13                     33 
+# F_Rheumatoid arthritis (established)     F_Undifferentiated arthritis    M_Arthralgia           M_Normal 
+# 73                                       5                               2                      14 
+# M_Osteoarthritis       M_Rheumatoid arthritis (early)   M_Rheumatoid arthritis (established)    M_Undifferentiated arthritis 
+# 9                     24                                22                                      1 
