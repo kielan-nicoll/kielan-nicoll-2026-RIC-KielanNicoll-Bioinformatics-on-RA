@@ -1,0 +1,110 @@
+# setting my work directory to proper location
+setwd("C:/users/kris_/OneDrive/Desktop/school stuff/R/GSE93272")
+
+getwd()
+# [1] "C:/users/kris_/OneDrive/Desktop/school stuff/R/GSE93272"
+
+# loading my libraries
+library(GEOquery)
+library(limma)
+
+# with libraries loaded I now load GSE89408 and its supplementary
+# files. I also check to make sure they are proper.
+gse1 <- getGEO("GSE93272", GSEMatrix = TRUE)
+names(gse1)
+# [1] "GSE93272_series_matrix.txt.gz"
+
+# checking data
+length(gse1)
+# [1] 1
+
+library(readr)
+
+eset1 <- gse1[[1]]
+eset1
+
+# ExpressionSet (storageMode: lockedEnvironment)
+# assayData: 54613 features, 275 samples 
+# element names: exprs 
+# protocolData: none
+# phenoData
+# sampleNames: GSM2449608 GSM2449609 ... GSM2449887 (275 total)
+# varLabels: title geo_accession ... tjc66.68:ch1 (101 total)
+# varMetadata: labelDescription
+# featureData
+# featureNames: 1007_s_at 1053_at ... 91952_at (54613 total)
+# fvarLabels: ID GB_ACC ... Gene Ontology Molecular Function (16 total)
+# fvarMetadata: Column Description labelDescription
+# experimentData: use 'experimentData(object)'
+# pubMedIds: 30013029 
+# Annotation: GPL570 
+
+# !GPL570!
+
+# extracting and checking expression data
+exprs_raw1 <- exprs(eset1)
+exprs_raw1
+
+#              GSM2449608 GSM2449609 GSM2449610 GSM2449611 GSM2449612 GSM2449613 GSM2449614 GSM2449615 GSM2449616 GSM2449617 GSM2449618 GSM2449619 GSM2449620
+# 1007_s_at      7.612408   7.567729   7.270872   7.409437   7.573101   7.310653   7.605667   7.370635   7.398630   7.627339   7.542674   7.462527   7.439317
+# 1053_at        6.414243   6.244399   6.452396   6.522964   6.651882   6.616909   6.219087   6.354396   6.348832   6.275851   6.257917   6.660665   6.787527
+# 117_at         9.191961   9.110493   9.534272  10.082628   9.620874   9.684034   9.129528   9.539999   9.557594   9.676147   9.567650   9.743699  10.169963
+
+pheno1 <- pData(eset1)
+pheno1
+
+# extracting expression matrix
+probe_ids1 <- exprs_raw1[[1]]               
+exprs_mat1 <- as.matrix(exprs_raw1[,-1])
+
+exprs_mat1 <- apply(exprs_mat1, 2, as.numeric)
+
+# now making sure data is formatted correctly
+dim(exprs_mat1)
+# [1] 54613   274
+
+dim(pheno1)
+# [1] 275 101
+# data is following the dimensions required.
+
+# checking for "sex" in metadata
+sex <- grep("characteristics_ch1.6", colnames(pheno1), ignore.case = TRUE, value = TRUE)
+# [1] "characteristics_ch1.6", this is the sex characteristics
+
+# inspecting sex metadata
+table(pheno1$characteristics_ch1.6)
+# gender: F gender: M 
+#       243        32 
+
+# now inspecting disease metadata
+disease_state <- grep("characteristics_ch1.1", colnames(pheno1), ignore.case = TRUE, value = TRUE)
+#  [1] "characteristics_ch1.1", this is the disease state characteristics
+
+# inspecting disease metadata
+table(pheno1$characteristics_ch1.1)
+
+# disease state: healthy control              disease state: RA 
+#                             43                            232 
+
+summary(exprs_mat1)
+
+#     GSM2449609       GSM2449610       GSM2449611       GSM2449612       GSM2449613         
+# Min.   : 2.681   Min.   : 2.702   Min.   : 2.720   Min.   : 2.669   Min.   : 2.782
+# 1st Qu.: 4.103   1st Qu.: 4.103   1st Qu.: 4.121   1st Qu.: 4.098   1st Qu.: 4.098  
+# Median : 5.189   Median : 5.194   Median : 5.201   Median : 5.199   Median : 5.182
+
+# Visualizing data
+boxplot(exprs_mat1[, 1:20], outline = FALSE, las = 2)
+# data looks pretty well normal
+
+# checking for any missing values, and assessing phenotype data
+sum(is.na(exprs_mat1))
+# [1] 0, this means no missing values.
+
+pheno1$group <- paste(pheno1$characteristics_ch1.6, pheno1$characteristics_ch1.1, sep = "_")
+table(pheno1$group)
+
+# gender: F_disease state: healthy control         gender: F_disease state: 
+# 38                                              205     
+# RA gender: M_disease state: healthy control     gender: M_disease state: RA 
+# 5      
