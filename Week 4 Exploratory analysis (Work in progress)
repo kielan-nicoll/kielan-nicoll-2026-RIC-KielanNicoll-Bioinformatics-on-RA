@@ -1,0 +1,570 @@
+setwd("C:/Users/kris_/Documents/R_Projects/GSE98408")
+
+list.files()
+
+# Loading all libraries used so far
+library(GEOquery)
+library(DESeq2)
+library(pheatmap)
+library(RColorBrewer)
+library(clusterProfiler)
+library(EnhancedVolcano)
+library(org.Hs.eg.db)
+
+# loading data collected so far to skip coding
+load("C:/Users/kris_/Documents/R_Projects/GSE98408/Data/Exploratory-Analysis-Data.RData")
+
+# Now good to continue
+# starting with downloading GSE89408
+
+gse <- getGEO("GSE89408", GSEMatrix = TRUE)
+gse <- gse[[1]]
+
+# extracting phenotype data
+pheno <- pData(gse)
+dim(pheno)
+# [1] 218  46a
+head(colnames(pheno))
+
+# getting supplementary data
+
+counts <- read.table("GSE89408_raw_counts_GRCh38.p13_NCBI.tsv",
+                     header = TRUE,
+                     sep = "\t",
+                     row.names = 1,
+                     check.names = FALSE)
+
+# checking counts data
+head(counts[,1])
+# [1]   61 1699  119    3    0    3
+range(counts)
+# [1]   0   19317662
+all(counts %% 1 == 0)
+# [1] TRUE
+
+# checking to see if data is aligned
+
+# pheno and counts differ in length, meaning one is either missing, or has too
+# many, so using intersect I grab only common samples between the two.
+
+# Find common samples
+common_samples <- intersect(rownames(pheno), colnames(counts))
+length(common_samples)
+
+# Subset and reorder
+pheno <- pheno[common_samples, , drop=FALSE]
+counts <- counts[, common_samples, drop=FALSE]
+
+all(rownames(pheno) == colnames(counts))
+# [1] TRUE
+
+# data is properly aligned, now I can do a pre-analysis.
+
+# checking depth variation in data
+dim(counts)
+# [1] 39376   207
+summary(colSums(counts))
+#     Min.  1st Qu.   Median     Mean  3rd Qu.     Max. 
+# 9844995 40420506 43459380 44188446 47431896 61718414
+
+# visualizing sequencing depth
+library_sizes <- colSums(counts)
+
+hist(library_sizes,
+     breaks = 30,
+     main = "Library Size Distribution",
+     xlab = "Total Counts per Sample")
+# slightly left skewed bell curve
+
+# visualizing single sample raw counts
+hist(counts[,1],
+     breaks = 50,
+     main = "Raw Count Distribution (Sample 1)",
+     xlab = "Counts")
+# extreme right skew, with a spike near zero.
+
+# box plot of raw counts with log10 for easier visualization.
+boxplot(log10(counts + 1),
+        outline = FALSE,
+        las = 2,
+        main = "Log10 Raw Counts per Sample")
+
+# Visualization of the Mean-Variance relationship to see
+# if using a negative binomial model like Deseq2 will work.
+gene_means <- rowMeans(counts)
+gene_vars <- apply(counts, 1, var)
+
+plot(gene_means,
+     gene_vars,
+     pch = 16,
+     cex = 0.3,
+     main = "Mean-Variance Relationship",
+     xlab = "Mean",
+     ylab = "Variance")
+# positive increase between mean and variance shows that 
+# Deseq2 will be viable. 
+
+# Creating a snapshot of pre-analysis-data 
+table(pheno$disease)
+# Arthralgia                         Normal                   Osteoarthritis 
+#         10                             23                               18 
+# Rheumatoid arthritis (early)    Rheumatoid arthritis (established)  Undifferentiated arthritis 
+#                          57                                     93                          6 
+
+table(pheno$Sex)
+#   F   M 
+# 140  67 
+
+# checking age as well
+sum(pheno$age == "NA")
+# [1] 25
+length(pheno$age)
+# [1] 207
+mean(pheno$age == "NA")
+# [1] 0.1207729
+
+# age may be accounted for with stipulations, checking to see if 
+# age varies in the disease group, had to clean the age group as numeric 
+# before plotting as it appeared as character data.
+
+pheno$age <- gsub("[^0-9.]", "", pheno$age)
+pheno$age <- as.numeric(pheno$age)
+summary(pheno$age)
+
+boxplot(pheno$age ~ pheno$`disease:ch1`,
+        na.action = na.omit,
+        las = 2,
+        main = "Age Distribution by Disease")
+# boxplot shows that normal group is on average younger at ~30 years, 
+# the disease groups cluster around the higher age of 50-60 years, this 
+# means that age can at least be associated with disease.
+
+
+
+# begining DESeq2 analysis by loading data, age must be numeric, 
+# sex and disease must be factors. All NA's must be removed from 
+# age data as well.
+
+# Identifying all samples with complete design info
+keep <- complete.cases(pheno[, c("Sex:ch1", "age", "disease:ch1")])
+
+# Sub-setting phenotype with complete info
+pheno_clean <- pheno[keep, ]
+
+# Sub-setting counts to match complete samples in pheno
+counts_clean <- counts[, rownames(pheno_clean)]
+
+# now verifying alignments
+all(rownames(pheno_clean) == colnames(counts_clean))
+# [1] TRUE
+
+# Now making sure that alignments are actually there
+
+# First I find common samples in my clean subsets.
+common <- intersect(colnames(counts_clean), rownames(pheno_clean))
+
+# then I re-order subsets to common samples
+counts_clean2 <- counts[, common]
+pheno_clean2 <- pheno_clean[common, ]
+
+# Forcing exact order match
+pheno_clean2 <- pheno_clean2[colnames(counts_clean2), ]
+
+# checking final allignment
+all(colnames(counts_clean2) == rownames(pheno_clean2))
+# [1] TRUE
+
+# making sure all characteristic data other than age is 
+# factor.
+pheno_clean2$Sex <- factor(pheno_clean2$Sex)
+pheno_clean2$disease <- factor(pheno_clean2$disease)
+
+# first doing DEqseq2 of all applicable factors
+
+dds <- DESeqDataSetFromMatrix(
+  countData = counts_clean2,
+  colData = pheno_clean2,
+  design = ~ Sex + age + disease)
+
+dds
+# class: DESeqDataSet 
+# dim: 39376 182 
+# metadata(1): version
+# assays(1): counts
+# rownames(39376): 100287102 653635 ... 4576 4571
+# rowData names(0):
+# colnames(182): GSM2370970 GSM2370971 ... GSM2371183 GSM2371185
+# colData names(49): title geo_accession ... Sex disease
+
+# checking PCA influence to see if age contributes to
+# variance
+
+dds <- DESeq(dds)
+vsd <- vst(dds, blind = FALSE)
+
+plotPCA(vsd, intgroup = "age")
+# PC1 makes up 58% of the variance, while PC2 only makes up 8%,
+# because point scattering seems to be random, this suggests that 
+# age groups do not perfectly correlate with PC1 or PC2. This implies
+# that the age group only partially explains the variation, and that 
+# other transcriptomics play a role. 
+
+plotPCA(vsd, intgroup = "Sex")
+# There is a clear separation between male and female along PC1, 
+# where PC1 doesn't quite show a separation. PC1 shows that 
+# sex is the dominant factor for variance. This means that 
+# sex differences attribute a large variation to the gene 
+# expression of the samples in this data set.
+
+plotPCA(vsd, intgroup = "disease")
+# PC2 variance may be due to the disease groups, as slight vertical 
+# seperation can be seen amongst disease groups, primarily 
+# the normal and RA groups, with arthralgia and osteoarthritis being 
+# intermediates between them. This small seperation may explain why 
+# PC2's variance (8%) is much smaller than PC1's (58%).
+
+# Now doing Deseq2 of just sex and disease to see if that changes
+# anything. dds(without age)
+
+ddswa <- DESeqDataSetFromMatrix(
+  countData = counts_clean2,
+  colData = pheno_clean2,
+  design = ~ Sex + disease)
+
+ddswa
+# class: DESeqDataSet 
+# dim: 39376 182 
+# metadata(1): version
+# assays(1): counts
+# rownames(39376): 100287102 653635 ... 4576 4571
+# rowData names(0):
+# colnames(182): GSM2370970 GSM2370971 ... GSM2371183 GSM2371185
+# colData names(49): title geo_accession ... Sex disease
+
+ddswa <- DESeq(ddswa)
+vsdwa <- vst(ddswa, blind = FALSE)
+
+plotPCA(vsdwa, intgroup = "Sex")
+plotPCA(vsdwa, intgroup = "disease")
+# almost no differences in plots. This implies that age 
+# plays little to no role in the variance of gene expression
+# in the samples from this data set.
+
+# Now that variance among groups is decided, isolation of the variance
+# through visualization techniques like heat maps or distance matrices.
+
+
+
+# data is already variance stabilized, so I can go straight to
+# checking sample to sample distances.
+
+# First is to compute sample distances
+sampleDists <- dist(t(assay(vsd)))
+
+# Then to convert them to a matrix for plotting
+sampleDistMatrix <- as.matrix(sampleDists)
+rownames(sampleDistMatrix) <- colnames(vsd)
+colnames(sampleDistMatrix) <- colnames(vsd)
+
+# Creating a color palette
+colors <- colorRampPalette(rev(brewer.pal(9, "Blues")))(255)
+
+# Then plotting a heat map of these distances
+pheatmap(sampleDistMatrix,
+         clustering_distance_rows = sampleDists,
+         clustering_distance_cols = sampleDists,
+         col = colors,
+         main = "Sample-to-sample distances")
+# heat map shows high data consistency, as each sample has close 
+# to 0 distance from itself. There is a baseline similarity across most 
+# samples (as in a small distance), with some certain samples showing 
+# higher distances. However, the difference between each sample if high 
+# enough to suggest that all samples are distinct from each other. The 
+# bottom right corner of the map seems to have an outline cluster, where
+# a small period of high distance turns into small distance, which implies 
+# that this cluster is much more similar to itself than to all the other 
+# samples. Certain bands distributed throughout the 
+# heat map suggests that certain samples in each group have significantly 
+# different from their average gene expression profile, in most RA 
+# studies this signifies either batch effects, or a strong biological 
+# variable. It would appear based on the dendrogram that groups do not 
+# display a strong biological signal. sample to sample distance maps
+# do not provide full clarity on expression, so higher clarity heat 
+# maps can provide better answers.
+
+# For instance, I can use a most variable genes heat map. (top 50).
+
+# Computing row variances
+geneVars <- apply(assay(vsd), 1, var)
+
+# Selecting top 50 most variable genes
+topGenes <- names(sort(geneVars, decreasing = TRUE))[1:50]
+
+# Subsetting the VST matrix
+topVarMat <- assay(vsd)[topGenes, ]
+
+# now making a heat map of the top variable genes
+
+# Adding sample annotations for clarity
+annotation <- as.data.frame(colData(vsd)[, c("Sex", "disease")])
+
+# Plotting heatmap
+pheatmap(topVarMat,
+         cluster_rows = TRUE,
+         cluster_cols = TRUE,
+         show_rownames = TRUE,
+         annotation_col = annotation,
+         scale = "row",
+         color = colorRampPalette(rev(brewer.pal(9, "RdBu")))(255),
+         main = "Top 50 variable genes")
+# This filters out genes that are mostly similar across all groups, 
+# which can provide clarity. Genes 7404-6192 are very up-regulated
+# in males and somewhat down-regulated in females, while the opposite
+# seems to be true for genes 7503-9383. This suggests that some
+# of the genes are present only on the X or Y chromosome. These two
+# sections of genes seem to belong each to their own gene cluster, 
+# with other gene clusters being 3043, 4312-4314, and a massive one
+# that is 28796-3512, meaning of the 50 most variable genes, there 
+# are 5 functional gene groups present. 
+
+# Now that some gene groupings are identified, I can do Differential
+# Expression analysis.
+
+# First is to change design to be more suitable
+dds$`Sex:ch1` <- factor(dds$Sex)
+dds$disease <- factor(dds$disease, levels = c("Normal", "Arthralgia", 
+                                              "Osteoarthritis", "Rheumatoid arthritis (established)", 
+                                              "Rheumatoid arthritis (early)"))
+
+design(dds) <- ~ Sex + disease
+
+table(dds$Sex, dds$disease)
+#   Normal Arthralgia Osteoarthritis Rheumatoid arthritis (established) Rheumatoid arthritis (early)
+# F     11          7              7                                 63                           33
+# M     12          1              5                                 19                           24
+
+# table looks correct
+
+# Getting results for disease effect
+
+# First getting result names so I know what to contrast
+
+resultsNames(dds)
+# [1] "Intercept"                                            "Sex_M_vs_F"                                          
+# [3] "disease_Arthralgia_vs_Normal"                         "disease_Osteoarthritis_vs_Normal"                    
+# [5] "disease_Rheumatoid.arthritis..established._vs_Normal" "disease_Rheumatoid.arthritis..early._vs_Normal"
+
+# Now contrasting Established Ra and Normal Gene expression using Log Fold Change.
+
+resLFCRAest <- results(dds,
+                  name = "disease_Rheumatoid.arthritis..established._vs_Normal",
+                  lfcThreshold = 1,
+                  alpha = 0.05, 
+                  altHypothesis = "greaterAbs")
+
+summary(resLFCRAest)
+
+# out of 39365 with nonzero total read count
+# adjusted p-value < 0.05
+# LFC > 1.00 (up)    : 2503, 6.4%
+# LFC < -1.00 (down) : 3305, 8.4%
+# outliers [1]       : 331, 0.84%
+# low counts [2]     : 3805, 9.7%
+# (mean count < 1)
+
+# Approximately 15% of expressed genes demonstrated significant >2-fold 
+# differential expression in established RA compared to Normal controls, which
+# highlights extensive molecular reprogramming associated with chronic 
+# inflammatory pathology.
+
+# Now contrasting Early Ra and Normal using Gene expression Log Fold Change.
+
+resLFCRAear <- results(dds,
+                       name = "disease_Rheumatoid.arthritis..early._vs_Normal",
+                       lfcThreshold = 1,
+                       alpha = 0.05, 
+                       altHypothesis = "greaterAbs")
+
+summary(resLFCRAear)
+
+# out of 39365 with nonzero total read count
+# adjusted p-value < 0.05
+# LFC > 1.00 (up)    : 1596, 4.1%
+# LFC < -1.00 (down) : 2886, 7.3%
+# outliers [1]       : 331, 0.84%
+# low counts [2]     : 3046, 7.7%
+# (mean count < 1)
+
+# Approximately 11% of expressed genes demonstrated significant >2-fold 
+# differential expression in early RA compared to Normal controls, which
+# indicates transcriptional dysregulation is already present at early disease
+# stages, lesser than what is observed in established RA.
+
+# Now contrasting Osteoarthritis and Normal Gene expression using Log Fold Change.
+resLFCOST <- results(dds,
+                       name = "disease_Osteoarthritis_vs_Normal",
+                       lfcThreshold = 1,
+                       alpha = 0.05, 
+                       altHypothesis = "greaterAbs")
+
+summary(resLFCOST)
+
+# out of 39365 with nonzero total read count
+# adjusted p-value < 0.05
+# LFC > 1.00 (up)    : 12, 0.03%
+# LFC < -1.00 (down) : 3, 0.0076%
+# outliers [1]       : 331, 0.84%
+# low counts [2]     : 0, 0%
+# (mean count < 0)
+
+# Approximately 0.04% of expressed genes demonstrated significant >2-fold 
+# differential expression in Osteoarthritis compared to Normal controls, which
+# suggests that there is minimal large-scale transcriptional disruption 
+# compared to normal synovial tissue. OA may not behave the same 
+# way as RA transcriptionally
+
+# Now contrasting Arthralgia and Normal Gene expression using Log Fold Change.
+resLFCARTH <- results(dds,
+                     name = "disease_Arthralgia_vs_Normal",
+                     lfcThreshold = 1,
+                     alpha = 0.05, 
+                     altHypothesis = "greaterAbs")
+
+summary(resLFCARTH)
+
+# out of 39365 with nonzero total read count
+# adjusted p-value < 0.05
+# LFC > 1.00 (up)    : 978, 2.5%
+# LFC < -1.00 (down) : 3985, 10%
+# outliers [1]       : 331, 0.84%
+# low counts [2]     : 5321, 14%
+# (mean count < 1)
+
+# Approximately 13% of expressed genes demonstrated significant >2-fold 
+# differential expression in Arthralgia compared to Normal controls, which
+# may reflect transcriptional alteration representing early inflammatory 
+# or pre-rheumatoid transcriptional activity. Down-regulation is significantly
+# more prevalent than up-regulation, which may be worth looking into in 
+# future studies.
+
+# Now contrasting Male and Female Gene expression using Log Fold Change.
+
+resLFCSEX <- results(dds,
+                       name = "Sex_M_vs_F",
+                       lfcThreshold = 1,
+                       alpha = 0.05, 
+                       altHypothesis = "greaterAbs")
+
+summary(resLFCSEX)
+
+# out of 39365 with nonzero total read count
+# adjusted p-value < 0.05
+# LFC > 1.00 (up)    : 44, 0.11%
+# LFC < -1.00 (down) : 2, 0.0051%
+# outliers [1]       : 331, 0.84%
+# low counts [2]     : 0, 0%
+# (mean count < 0)
+
+# Approximately 0.12% of expressed genes demonstrated significant >2-fold 
+# differential expression between male and female samples, which
+# suggests that sex plays little to no role in large-scale transcriptional
+# variation when disease status is controlled for.
+
+
+
+# After combing through controlled contrasted gene expression, visualization 
+# of gene expression through volcano plots can help give a good idea
+# of what genes to target in KEGG enrichment.
+
+# starting with plot of Sex contrast
+
+EnhancedVolcano(resLFCSEX,
+                lab = rownames(resLFCSEX),
+                x = 'log2FoldChange',
+                y = 'padj',
+                title = "Differential expression by Sex",
+                pCutoff = 0.05,
+                FCcutoff = 0)
+
+# This plot shows 
+
+# then plotting RAest and Normal contrast
+
+EnhancedVolcano(resLFCRAest,
+                lab = rownames(resLFCRAest),
+                x = 'log2FoldChange',
+                y = 'padj',
+                title = "Differential expression by disease: RA-established",
+                pCutoff = 0.05,
+                FCcutoff = 0)
+
+# This plot shows 
+
+# then plotting RAear and Normal contrast
+
+EnhancedVolcano(resLFCRAear,
+                lab = rownames(resLFCRAear),
+                x = 'log2FoldChange',
+                y = 'padj',
+                title = "Differential expression by disease: RA-early",
+                pCutoff = 0.05,
+                FCcutoff = 0)
+
+# This plot shows
+
+# then plotting OA and Normal contrast
+
+EnhancedVolcano(resLFCOST,
+                lab = rownames(resLFCOST),
+                x = 'log2FoldChange',
+                y = 'padj',
+                title = "Differential expression by Sex",
+                pCutoff = 0.05,
+                FCcutoff = 0)
+
+# This plot shows
+
+# then plotting ARTH and Normal contrast
+
+EnhancedVolcano(resLFCARTH,
+                lab = rownames(resLFCARTH),
+                x = 'log2FoldChange',
+                y = 'padj',
+                title = "Differential expression by Sex",
+                pCutoff = 0.05,
+                FCcutoff = 0)
+
+# This plot shows
+
+
+
+# after visualization of significantly expressed genes, enrichment can occur.
+
+# starting again with sex contrast via GSEA in KEGG, trying to use ORA did not 
+# identify any significantly enriched pathways at FDR < 0.05. This reflects the
+# relatively small number of DEGs and limited functional clustering.
+
+sig_genes_sex <- rownames(resLFCSEX)[!is.na(resLFCSEX$padj) & resLFCSEX$padj < 0.05]
+
+gene_list <- resLFCSEX$log2FoldChange
+names(gene_list) <- rownames(resLFCSEX)
+gene_list <- sort(gene_list, decreasing = TRUE)
+
+gse <- gseKEGG(
+  geneList = gene_list,
+  organism = "hsa")
+
+dotplot(gse)
+
+# Plot shows that ribosome shows a very strong result, 
+# which could reflect sex-differences in immune cell activation states due to
+# ribosomal activity often correlated with cellular proliferation and immune
+# activation. This makes sense with my PCA result where sex explains 58% of
+# PC1 variance. Other significantly strong pathways were the Systemic Lupus 
+# Erythematosus (SLE) pathways responsible for histones, ribosomal proteins, 
+# and immune-related nuclear antigens. This suggests that sex influences 
+# immune pathway architecture. Neutrophil Extracellular Trap Formation (NETF)
+# pathways were also sex-enriched which means that sex could make a difference
+# in the immune activation RA-afflicted synovial tissues. 
+
+# this is all I have as of monday, march 2nd, 2026.
