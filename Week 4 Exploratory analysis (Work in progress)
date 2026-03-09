@@ -293,12 +293,33 @@ boxplot(assay(vsd),
 mcols(resLFCRAest)$maxCooks
 # NULL
 boxplot(colMeans(assay(vsd)))
+
 # some potential outliers present, 17 pass the IQR, with 3 really standing out. 
-# Checking PCA for further confirmation.
+# Checking PCA for further confirmation. Starting with a PCA coloured by age
+# to see any pattern in variance caused by age.
 
 sdpca <- plotPCA(vsd, intgroup=c("Sex","disease"), returnData=TRUE)
 
 percentVar <- round(100 * attr(sdpca, "percentVar"))
+
+ggplot(sdpca, aes(PC1, PC2, color=pheno_clean2$age)) +
+  geom_point(size=3) +
+  scale_color_gradient(low="black", high="yellow") +
+  theme_bw() +
+  labs(
+    title="PCA Colored by Age",
+    x=paste0("PC1: ", percentVar[1], "% variance"),
+    y=paste0("PC2: ", percentVar[2], "% variance"), 
+    color="Age")
+
+# PC1 makes up 58% of the variance, while PC2 only makes up 8%,
+# because point scattering seems to be random aside from most of the 
+# youngest groups being in the -50 PC1 range.This suggests that 
+# age groups do not perfectly correlate with PC1 or PC2. This implies
+# that the age group only partially explains the variation, and that 
+# other transcriptomics play a role. 
+
+# Now plotting PCA where sex and disease are incorporated.
 
 ggplot(sdpca, aes(PC1, PC2, color=Sex, shape=disease)) +
   geom_point(size=3) +
@@ -307,20 +328,12 @@ ggplot(sdpca, aes(PC1, PC2, color=Sex, shape=disease)) +
     title="Principal Component Analysis of RNA-seq Samples",
     x=paste0("PC1: ", percentVar[1], "% variance"),
     y=paste0("PC2: ", percentVar[2], "% variance"))
-# PC1 makes up 58% of the variance, while PC2 only makes up 8%,
-# because point scattering seems to be random, this suggests that 
-# age groups do not perfectly correlate with PC1 or PC2. This implies
-# that the age group only partially explains the variation, and that 
-# other transcriptomics play a role. 
 
-plotPCA(vsd, intgroup = "Sex")
 # There is a clear separation between male and female along PC1, 
 # where PC1 doesn't quite show a separation. PC1 shows that 
 # sex is the dominant factor for variance. This means that 
 # sex differences attribute a large variation to the gene 
 # expression of the samples in this data set.
-
-plotPCA(vsd, intgroup = "disease")
 # PC2 variance may be due to the disease groups, as slight vertical 
 # seperation can be seen amongst disease groups, primarily 
 # the normal and RA groups, with arthralgia and osteoarthritis being 
@@ -357,8 +370,6 @@ plotPCA(vsdwa, intgroup = "disease")
 # Now that variance among groups is decided, isolation of the variance
 # through visualization techniques like heat maps or distance matrices.
 
-
-
 # data is already variance stabilized, so I can go straight to
 # checking sample to sample distances.
 
@@ -374,16 +385,15 @@ colnames(sampleDistMatrix) <- colnames(vsd)
 colors <- colorRampPalette(rev(brewer.pal(9, "Blues")))(255)
 
 # Then plotting a heat map of these distances
+annotation <- as.data.frame(colData(vsd)[,c("Sex","disease","age")])
+
 pheatmap(
   sampleDistMatrix,
   clustering_distance_rows = sampleDists,
   clustering_distance_cols = sampleDists,
+  annotation_col = annotation,
   col = colorRampPalette(rev(brewer.pal(9,"Blues")))(255),
-  fontsize = 8,
-  main = "Sample-to-Sample Distance Heatmap")
-
-annotation <- as.data.frame(colData(vsd)[,c("Sex","disease")])
-annotation_col = annotation
+  main="Sample-to-Sample Distance Heatmap")
 
 # heat map shows high data consistency, as each sample has close 
 # to 0 distance from itself. There is a baseline similarity across most 
@@ -410,6 +420,14 @@ geneVars <- apply(assay(vsd), 1, var)
 # Selecting top 50 most variable genes
 topGenes <- names(sort(geneVars, decreasing = TRUE))[1:50]
 
+# [1] "3514"      "3500"      "7503"      "3538"      "3502"      "3539"      "3503"      "3505"     
+# [9] "28912"     "3507"      "9383"      "3501"      "28908"     "28914"     "28299"     "3537"     
+# [17] "8284"      "28930"     "28442"     "100423062" "28893"     "28913"     "28933"     "28947"    
+# [25] "3493"      "3512"      "3043"      "8287"      "7404"      "28813"     "28439"     "28434"    
+# [33] "28444"     "28950"     "28815"     "28797"     "28832"     "4312"      "28949"     "28896"    
+# [41] "28796"     "6192"      "28809"     "8653"      "28392"     "28474"     "28468"     "28394"    
+# [49] "28450"     "4314" 
+
 # Subsetting the VST matrix
 topVarMat <- assay(vsd)[topGenes, ]
 
@@ -426,7 +444,7 @@ pheatmap(topVarMat,
          annotation_col = annotation,
          scale = "row",
          color = colorRampPalette(rev(brewer.pal(9, "RdBu")))(255),
-         main = "Top 50 variable genes")
+         main = "Top 50 variable genes across samples")
 # This filters out genes that are mostly similar across all groups, 
 # which can provide clarity. Genes 7404-6192 are very up-regulated
 # in males and somewhat down-regulated in females, while the opposite
@@ -436,6 +454,17 @@ pheatmap(topVarMat,
 # with other gene clusters being 3043, 4312-4314, and a massive one
 # that is 28796-3512, meaning of the 50 most variable genes, there 
 # are 5 functional gene groups present. 
+
+# genes 7404 (UTY), 8287 (USP9Y), 8653 (DDX3Y), 8284 (KDM5D), and 
+# 6192 (RPS4Y1), are all Y-linked genes, which makes sense why they
+# are up-regulated in males. While 7503 (XIST) and 9383 (TSIX) are both
+# X-linked genes which makes sense as to why they are up-regulated in 
+# females. Gene 3043 (HBB) is a beta-globin gene. 4312 (MMP1) and 
+# 4314 (MMP3) are involved in enzymes that break down extracellular 
+# proteins. Gene 28796 (IGLV3-21) which is involved in antigen binding 
+# for immune cells, all genes between 28796 to 3512 are involved in the 
+# immune system in some way. 
+
 
 # Now that some gene groupings are identified, I can do Differential
 # Expression analysis.
@@ -600,9 +629,16 @@ EnhancedVolcano(
   labSize = 3,
   colAlpha = 0.8)
 
-# This plot shows 
+# This plot shows some genes having statistically significant results for 
+# both adjusted p-values below 0.05 and log2 fold changes. Most of which 
+# show very strong up-regulation, with log2 fold changes exceeding 5 with
+# highly significant p-values. Suggesting that there are few but strong
+# transcriptional differences between sexes based off of the samples
+# of this study. The sex differences can be related to immune-pathways,
+# possibly hinting to a difference in the way RA is presented between the
+# sexes.
 
-# then plotting RAest and Normal contrast
+# then plotting established RA and Normal contrast
 
 EnhancedVolcano(
   resLFCRAest,
@@ -616,9 +652,18 @@ EnhancedVolcano(
   labSize = 3,
   colAlpha = 0.8)
 
-# This plot shows 
+# This plot shows that numerous genes exhibit statistically significant 
+# adjusted p-values below 0.005 and large log2 fold changes. Several of which 
+# demonstrate strong up-regulation  in RA samples, with log2 fold changes 
+# exceeding 10 and highly significant p-values. This suggests that extensive 
+# transcriptional changes associated with established RA. The predominance 
+# of positively shifted genes indicates an increased expression of inflammatory
+# or immune-related pathways, which is consistent with the chronic inflammatory
+# nature of RA. Main take-aways are; many genes are significantly different, 
+# with more having strong positive fold changes, with few having large fold 
+# changes over 10.
 
-# then plotting RAear and Normal contrast
+# then plotting early RA and Normal contrast
 
 EnhancedVolcano(
   resLFCRAear, 
@@ -632,7 +677,10 @@ EnhancedVolcano(
   labSize = 3,
   colAlpha = 0.8)
 
-# This plot shows
+# This plot shows similar results to the establish RA vs normal results. 
+# with pretty similar adjusted p-value below 0.05 and log2 fold change results. 
+# Which in turns suggests that early vs established RA may not express immune
+# pathways very differently.
 
 # then plotting OA and Normal contrast
 
@@ -648,7 +696,12 @@ EnhancedVolcano(
   labSize = 3,
   colAlpha = 0.8)
 
-# This plot shows
+# This plot shows that most genes fail to reach statistical significance, 
+# which indicates that global gene expression patterns remain relatively 
+# similar between OA and normal tissues. A small number of genes exhibit
+# strong up-regulation which suggests that specific pathways may still be
+# involved in OA pathology, although the magnitude of transcriptomic changes
+# appears small than what is observed in RA.
 
 # then plotting ARTH and Normal contrast
 
@@ -664,7 +717,12 @@ EnhancedVolcano(
   labSize = 3,
   colAlpha = 0.8)
 
-# This plot shows
+# This plot shows that even in early inflammatory stages still shows
+# significantly differentially expressed genes, which indicates that 
+# transcriptional changes may begin early in the diseases pathology. 
+# Both up-regulated and down regulated genes are present, which suggests 
+# that early inflammatory signaling or immune dysregulation may already 
+# be happening prior to the establishment of RA.
 
 
 
@@ -689,8 +747,9 @@ dotplot(gse, showCategory = 15) +
 # Plot shows that ribosome shows a very strong result, 
 # which could reflect sex-differences in immune cell activation states due to
 # ribosomal activity often correlated with cellular proliferation and immune
-# activation. This makes sense with my PCA result where sex explains 58% of
-# PC1 variance. Other significantly strong pathways were the Systemic Lupus 
+# activation. This makes sense with my PCA result where PC1 explains 58% of
+# of the variance and visually seperates samples by sex, meaning sex may be 
+# attrivuted to it. Other significantly strong pathways were the Systemic Lupus 
 # Erythematosus (SLE) pathways responsible for histones, ribosomal proteins, 
 # and immune-related nuclear antigens. This suggests that sex influences 
 # immune pathway architecture. Neutrophil Extracellular Trap Formation (NETF)
@@ -700,93 +759,6 @@ dotplot(gse, showCategory = 15) +
 # now I know significant genes, I can comb through KEGG to find their 
 # biological meaning.
 
-gse@result
-
-#                ID                                                   Description setSize enrichmentScore       NES
-# hsa03008 hsa03008                             Ribosome biogenesis in eukaryotes     125      -0.6770642 -2.730913
-# hsa04613 hsa04613                       Neutrophil extracellular trap formation     194      -0.6209805 -2.645282
-# hsa05322 hsa05322                                  Systemic lupus erythematosus     138      -0.6143596 -2.512266
-# hsa05034 hsa05034                                                    Alcoholism     190      -0.5652989 -2.399552
-# hsa04382 hsa04382                                  Cornified envelope formation     212      -0.5347789 -2.307488
-# hsa05203 hsa05203                                          Viral carcinogenesis     204      -0.5123662 -2.185838
-# hsa04820 hsa04820                                  Cytoskeleton in muscle cells     233       0.5543840  2.194269
-# hsa03010 hsa03010                                                      Ribosome     204      -0.4550826 -1.941456
-# hsa04740 hsa04740                                        Olfactory transduction     434       0.4530327  1.891027
-# hsa04625 hsa04625                      C-type lectin receptor signaling pathway     105      -0.5217212 -2.053264
-# hsa04061 hsa04061 Viral protein interaction with cytokine and cytokine receptor      98      -0.5441038 -2.114570
-# hsa05202 hsa05202                       Transcriptional misregulation in cancer     201      -0.4229716 -1.804452
-# hsa04062 hsa04062                                   Chemokine signaling pathway     191      -0.4357654 -1.845692
-# hsa04064 hsa04064                                  NF-kappa B signaling pathway     104      -0.5029679 -1.970929
-# hsa04744 hsa04744                                             Phototransduction      28      -0.7028535 -2.116236
-# hsa05010 hsa05010                                             Alzheimer disease     387      -0.3315560 -1.526095
-# hsa04060 hsa04060                        Cytokine-cytokine receptor interaction     296      -0.3629544 -1.631118
-# hsa04659 hsa04659                                     Th17 cell differentiation     107      -0.4684646 -1.847597
-# hsa04370 hsa04370                                        VEGF signaling pathway      60      -0.5464920 -1.925732
-# hsa04380 hsa04380                                    Osteoclast differentiation     134      -0.4327350 -1.760200
-# hsa04640 hsa04640                                    Hematopoietic cell lineage      98      -0.4762095 -1.850710
-# hsa05135 hsa05135                                            Yersinia infection     138      -0.4352901 -1.780008
-# hsa04658 hsa04658                              Th1 and Th2 cell differentiation      91      -0.4814259 -1.811510
-# hsa03082 hsa03082                            ATP-dependent chromatin remodeling     116      -0.4399110 -1.743659
-# hsa05321 hsa05321                                    Inflammatory bowel disease      64      -0.5310721 -1.910059
-# hsa04218 hsa04218                                           Cellular senescence     157      -0.4013661 -1.673817
-# hsa05330 hsa05330                                           Allograft rejection      37      -0.6077703 -1.960318
-# hsa05166 hsa05166                       Human T-cell leukemia virus 1 infection     222      -0.3605899 -1.561167
-# hsa00860 hsa00860                                          Porphyrin metabolism      46      -0.5745960 -1.924053
-# hsa05022 hsa05022             Pathways of neurodegeneration - multiple diseases     478      -0.2983244 -1.395894
-# hsa05140 hsa05140                                                 Leishmaniasis      76      -0.4723207 -1.751496
-# hsa04217 hsa04217                                                   Necroptosis     165      -0.3723915 -1.565191
-# hsa05012 hsa05012                                             Parkinson disease     267      -0.3344529 -1.503022
-# hsa04672 hsa04672                  Intestinal immune network for IgA production      48      -0.5298116 -1.796193
-# hsa04662 hsa04662                             B cell receptor signaling pathway      83      -0.4655111 -1.735532
-# hsa04210 hsa04210                                                     Apoptosis     137      -0.3931568 -1.605372
-# hsa04145 hsa04145                                                     Phagosome     152      -0.3781245 -1.577041
-# hsa04916 hsa04916                                                 Melanogenesis     101      -0.4374089 -1.710850
-# hsa04666 hsa04666                              Fc gamma R-mediated phagocytosis      98      -0.4260799 -1.655889
-# hsa00053 hsa00053                             Ascorbate and aldarate metabolism      31      -0.6090268 -1.900244
-# hsa05219 hsa05219                                                Bladder cancer      41      -0.5473616 -1.778951
-# hsa04115 hsa04115                                         p53 signaling pathway      75      -0.4525298 -1.672559
-# hsa00190 hsa00190                                     Oxidative phosphorylation     135      -0.3833872 -1.565287
-# hsa04611 hsa04611                                           Platelet activation     126      -0.3783315 -1.534608
-# hsa00040 hsa00040                      Pentose and glucuronate interconversions      36      -0.5545204 -1.767220
-# hsa05144 hsa05144                                                       Malaria      50      -0.5062791 -1.733318
-# hsa05217 hsa05217                                          Basal cell carcinoma      63      -0.4611140 -1.654785
-# hsa05214 hsa05214                                                        Glioma      76      -0.4451893 -1.650885
-# hsa05152 hsa05152                                                  Tuberculosis     179      -0.3543321 -1.501321
-# hsa04750 hsa04750              Inflammatory mediator regulation of TRP channels      99      -0.4205254 -1.639088
-# hsa04668 hsa04668                                         TNF signaling pathway     119      -0.3865301 -1.544870
-# hsa05170 hsa05170                      Human immunodeficiency virus 1 infection     213      -0.3308424 -1.429439
-# hsa05323 hsa05323                                          Rheumatoid arthritis      91      -0.4208213 -1.583467
-# hsa05014 hsa05014                                 Amyotrophic lateral sclerosis     365      -0.2935909 -1.339237
-# hsa04940 hsa04940                                      Type I diabetes mellitus      42      -0.5223741 -1.699933
-# hsa05415 hsa05415                                       Diabetic cardiomyopathy     204      -0.3368017 -1.436851
-# hsa05167 hsa05167               Kaposi sarcoma-associated herpesvirus infection     195      -0.3332459 -1.416747
-# hsa05165 hsa05165                                Human papillomavirus infection     332      -0.2982493 -1.342436
-# hsa05332 hsa05332                                     Graft-versus-host disease      39      -0.5262651 -1.707637
-# hsa05146 hsa05146                                                    Amoebiasis     103      -0.3904782 -1.527439
-# hsa05340 hsa05340                                      Primary immunodeficiency      38      -0.5332469 -1.721316
-# hsa05143 hsa05143                                       African trypanosomiasis      37      -0.5325746 -1.717780
-# hsa05163 hsa05163                               Human cytomegalovirus infection     225      -0.3243919 -1.413239
-# hsa04621 hsa04621                           NOD-like receptor signaling pathway     186      -0.3376407 -1.430443
-# hsa05224 hsa05224                                                 Breast cancer     148      -0.3534723 -1.463126
-# hsa04144 hsa04144                                                   Endocytosis     250      -0.3168720 -1.401180
-# hsa04657 hsa04657                                       IL-17 signaling pathway      94      -0.3965656 -1.519592
-# hsa05133 hsa05133                                                     Pertussis      76      -0.4206243 -1.559791
-# hsa03320 hsa03320                                        PPAR signaling pathway      76       0.5083259  1.678310
-# hsa00620 hsa00620                                           Pyruvate metabolism      47       0.5588300  1.722818
-# hsa04260 hsa04260                                    Cardiac muscle contraction      87       0.4735732  1.598018
-# hsa04330 hsa04330                                       Notch signaling pathway      62      -0.4339017 -1.546643
-# hsa04114 hsa04114                                                Oocyte meiosis     135      -0.3488511 -1.424283
-
-gene_info <- select(
-  org.Hs.eg.db,
-  keys = gene_symbols,
-  columns = c("SYMBOL","GENENAME"),
-  keytype = "SYMBOL")
-
-gene_info
-
-
-# sorting through these results for the significantly expressed genes.
 ribosome_genes <- strsplit(
   gse@result$core_enrichment[gse@result$Description == "Ribosome"],
   "/"
@@ -799,7 +771,44 @@ gene_symbols <- mapIds(
   keytype = "ENTREZID",
   multiVals = "first")
 
+gene_symbols
 
+# 51021        219927          6130          6128          6233          6188          6175 
+# "MRPS16"      "MRPL21"       "RPL7A"        "RPL6"      "RPS27A"        "RPS3"       "RPLP0" 
+# 9349          6202         51258          6222          9553          6134          6217 
+# "RPL23"        "RPS8"      "MRPL51"       "RPS18"      "MRPL33"       "RPL10"       "RPS16" 
+# 64978          6201          6206     100169760          6228          6218          6229 
+# "MRPL38"        "RPS7"       "RPS12"      "RNA5S9"       "RPS23"       "RPS17"       "RPS24" 
+# 10399         92259         64928          6143         51065         64981          6144 
+# "RACK1"        "KGD4"      "MRPL14"       "RPL19"      "RPS27L"      "MRPL34"       "RPL21" 
+# 6135          6154          6230          4736     100529239         55052          6164 
+# "RPL11"       "RPL26"       "RPS25"      "RPL10A" "RPS10-NUDT3"      "MRPL20"       "RPL34" 
+# 6132          6157          9045          3921         23521          6208          6155 
+# "RPL8"      "RPL27A"       "RPL14"        "RPSA"      "RPL13A"       "RPS14"       "RPL27" 
+# 64979          6122         65993          6160     106632260          6207         10573 
+# "MRPL36"        "RPL3"      "MRPS34"       "RPL31"   "RNA5-8SN1"       "RPS13"      "MRPL28" 
+# 6204          6173          6227          6147         64951         51073          6193 
+# "RPS10"      "RPL36A"       "RPS21"      "RPL23A"      "MRPS24"       "MRPL4"        "RPS5" 
+# 2197          6159        116540          6171          6231          6141          7311 
+# "FAU"       "RPL29"      "MRPL53"       "RPL41"       "RPS26"       "RPL18"       "UBA52" 
+# 6170         51116          4550          6205          6165          6210          6156 
+# "RPL39"       "MRPS2"     "MT-RNR2"       "RPS11"      "RPL35A"      "RPS15A"       "RPL30" 
+# 6169          6161          6167          6137          6168          6183         11224 
+# "RPL38"       "RPL32"       "RPL37"       "RPL13"      "RPL37A"      "MRPS12"       "RPL35" 
+# 6181         64949          6187     109910381     109864274          6203         25873 
+# "RPLP2"      "MRPS26"        "RPS2"   "RNA5-8SN3"   "RNA5-8SN4"        "RPS9"       "RPL36" 
+# 6232          6158          6176          6182     109864280         64975          6142 
+# "RPS27"       "RPL28"       "RPLP1"      "MRPL12"    "RNA18SN2"      "MRPL41"      "RPL18A" 
+# 6223          6234          6150          6209          6235     100008587     109864281 
+# "RPS19"       "RPS28"      "MRPL23"       "RPS15"       "RPS29"   "RNA5-8SN5"   "RNA5-8SN2" 
+# 4549     109910380     109864282     109864273     100008588     109864272     106631781 
+# "MT-RNR1"    "RNA18SN3"    "RNA28SN2"    "RNA18SN4"    "RNA18SN5"    "RNA28SN4"    "RNA18SN1" 
+# 6191     100008589     109910382     106632264     100169767     100169758     100169764 
+# "RPS4X"    "RNA28SN5"    "RNA28SN3"    "RNA28SN1"     "RNA5S16"      "RNA5S7"     "RNA5S13" 
+# 100169762     100169757     100169753     100169755     100169754     100169766     100169763 
+# "RNA5S11"      "RNA5S6"      "RNA5S2"      "RNA5S4"      "RNA5S3"     "RNA5S15"     "RNA5S12" 
+# 100169759     100169751     100169756     100169768     100169761     100169765 
+# "RNA5S8"      "RNA5S1"      "RNA5S5"     "RNA5S17"     "RNA5S10"     "RNA5S14"
 
 # checking for batch effects.
 colnames(pheno_clean2)
@@ -819,6 +828,5 @@ table(pheno_clean2$submission_date)
 # Nov 01 2016 
 #         182
 
-# No variability found in common batch candidates. 
-
-# this is all I have as of monday, march 8th, 2026.
+# No variability found in common batch candidates.Thus concluding exploratory
+# analysis on march 8th, 2026.
