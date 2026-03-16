@@ -1,4 +1,10 @@
+### DGEA OF GSE 89408###
+# 01-Loading-Data ---------------------------------------------------------
+
+
 setwd("C:/R_Projects/GSE89408")
+
+# follow this strategy https://pmc.ncbi.nlm.nih.gov/articles/PMC4670015/
 
 list.files()
 
@@ -53,9 +59,36 @@ gse <- gse[[1]]
 pheno <- pData(gse)
 dim(pheno)
 # [1] 218  46a
-head(colnames(pheno))
 
-# getting supplementary data
+#checking to see if data is normalized
+
+# Verifying that the data represents raw counts rather than normalized data.
+# Raw RNA-seq counts should be integer values.
+all(pheno %% 1 == 0)
+# [Error in FUN(left, right) : non-numeric argument to binary operator
+# -> this indicates that counts are not integer values, 
+
+# Additionally, the count range includes large values typical of raw read counts
+range(pheno)
+# Error in FUN(X[[i]], ...) : 
+# only defined on a data frame with all numeric-alike variables
+# -> this further indicates that using the data provided by getGEO() is
+# normalized and not raw.
+
+
+# Loading a raw count matrix downloaded from GEO supplementary files
+# File: GSE89408_raw_counts_GRCh38.p13_NCBI.tsv
+# Source: NCBI GEO (Series GSE89408) supplementary data
+# Description:
+#   - Rows = genes (Entrez Gene IDs)
+#   - Columns = RNA-seq samples
+#   - Values = raw read counts mapped to genes
+#   - Reference genome: GRCh38.p13
+
+# Expression data retrieved from getGEO() was already normalized, which
+# would mean it is not raw counts which are required for Deseq2 analysis.
+# This file contains the original raw RNA-seq read counts which are required
+# for the DGEA that I plan on doing.
 
 counts <- read.table("GSE89408_raw_counts_GRCh38.p13_NCBI.tsv",
                      header = TRUE,
@@ -66,10 +99,25 @@ counts <- read.table("GSE89408_raw_counts_GRCh38.p13_NCBI.tsv",
 # checking counts data
 head(counts[,1])
 # [1]   61 1699  119    3    0    3
+
+# Verifying that the data represents raw counts rather than normalized data.
+# Raw RNA-seq counts should be integer values.
+all(counts %% 1 == 0)
+# [1] TRUE -> this indicates that counts are integer values, 
+
+# Additionally, the count range includes large values typical of raw read counts
 range(counts)
 # [1]   0   19317662
-all(counts %% 1 == 0)
-# [1] TRUE
+
+# Since all values are integers and span a wide range of sequencing depths,
+# this confirms that the file contains raw read counts suitable for DESeq2.
+
+# Because of how DESeq2 works, the raw counts will be normalized internally 
+# using size factor estimation and variance stabilizing transformation (VST)
+# This avouds using externally normalized data which ensures that dispersion
+# estimates and differential expression statistics are calculated correctly
+# according to the DESeq2 workflow.
+
 
 # checking to see if data is aligned
 
@@ -87,7 +135,30 @@ counts <- counts[, common_samples, drop=FALSE]
 all(rownames(pheno) == colnames(counts))
 # [1] TRUE
 
+#
+#
+#
 # data is properly aligned, now I can do a pre-analysis.
+# By ensuring that sample identifiers match between phenotype metadata
+# and the RNA-seq count matrix I am able to match metadata characteristics
+# like sex and disease type to the RNA-seq raw counts. This allows for 
+# pathway comparisons between such characteristics. Intersect() is used
+# to identify samples that appear in  both data sets so that phenotype
+# metadata and count data remain correctly aligned. 
+#
+#
+#
+# Sex will not be used to subset the data set into separate analyses, instead
+# it will be included as a co-variate in the DESeq2 design formula so that 
+# differential expression results account for the transcriptional differences 
+# between males and females.
+#
+#
+#
+
+
+# 02-Exploratory-Analysis -------------------------------------------------
+
 
 # checking depth variation in data
 dim(counts)
@@ -191,6 +262,32 @@ ggplot(pheno, aes(x = `disease:ch1`, y = age, fill = `disease:ch1`)) +
 # the disease groups cluster around the higher age of 50-60 years, this 
 # means that age can at least be associated with disease.
 
+
+# 03-Differential-Expression-Analysis -------------------------------------
+
+#
+#
+#
+# Starting DESeq2 analysis.
+#
+#
+#
+
+
+# The analyses I plan to perform are:
+
+# 1: Sex differences between male and female samples
+# 2: Diseased tissue comparisons vs Normal control tissues.
+#   - RA (early) vs Normal
+#   - RA (established) vs Normal
+#   - Arthalgia vs Normal
+#   - OA vs Normal
+
+# These contrasts are planned to identify transcriptional signatures associated
+# with different stages of inflammatory arthritis, while controlling for sex 
+# differences in gene expression.
+
+
 # begining DESeq2 analysis by loading data, age must be numeric, 
 # sex and disease must be factors. All NA's must be removed from 
 # age data as well.
@@ -269,7 +366,7 @@ dds
 boxplot(assay(dds),
         outline = FALSE,
         las = 2,
-        main = "dds counts")
+        main = "dds raw counts")
 
 # high dispersion, with somewhat normalized means.
 
@@ -285,7 +382,7 @@ vsd <- vst(dds, blind = FALSE)
 boxplot(assay(vsd),
         outline = FALSE,
         las = 2,
-        main = "VST-normalized counts")
+        main = "VST-normalized dds counts")
 # Data looks very viable. Much lower dispersion with similar medians.
 
 # checking for outliers with boxplot before using PCA
@@ -339,33 +436,6 @@ ggplot(sdpca, aes(PC1, PC2, color=Sex, shape=disease)) +
 # the normal and RA groups, with arthralgia and osteoarthritis being 
 # intermediates between them. This small seperation may explain why 
 # PC2's variance (8%) is much smaller than PC1's (58%).
-
-# Now doing Deseq2 of just sex and disease to see if that changes
-# anything. dds(without age)
-
-ddswa <- DESeqDataSetFromMatrix(
-  countData = counts_clean2,
-  colData = pheno_clean2,
-  design = ~ Sex + disease)
-
-ddswa
-# class: DESeqDataSet 
-# dim: 39376 182 
-# metadata(1): version
-# assays(1): counts
-# rownames(39376): 100287102 653635 ... 4576 4571
-# rowData names(0):
-# colnames(182): GSM2370970 GSM2370971 ... GSM2371183 GSM2371185
-# colData names(49): title geo_accession ... Sex disease
-
-ddswa <- DESeq(ddswa)
-vsdwa <- vst(ddswa, blind = FALSE)
-
-plotPCA(vsdwa, intgroup = "Sex")
-plotPCA(vsdwa, intgroup = "disease")
-# almost no differences in plots. This implies that age 
-# plays little to no role in the variance of gene expression
-# in the samples from this data set.
 
 # Now that variance among groups is decided, isolation of the variance
 # through visualization techniques like heat maps or distance matrices.
@@ -466,14 +536,48 @@ pheatmap(topVarMat,
 # immune system in some way. 
 
 
-# Now that some gene groupings are identified, I can do Differential
-# Expression analysis.
+# checking for batch effects.
+colnames(pheno_clean2)
+# possible batch effects are "submission_date", "instrument_model", and 
+# "platform_id". Now checking to see if candidate batch effects may provide 
+# variability.
+
+table(pheno_clean2$instrument_model)
+# Illumina HiSeq 2000 
+#                 182 
+
+table(pheno_clean2$platform_id)
+# GPL11154 
+#      182
+
+table(pheno_clean2$submission_date)
+# Nov 01 2016 
+#         182
+
+# No variability found in common batch candidates.Thus concluding exploratory
+# analysis on march 8th, 2026.
+
+#
+#
+#
+#
+#
+### Differential Gene Expression Analysis ###
+#
+#
+#
+#
+#
+
+# Now that some gene groupings are identified and batch effects are checked
+# I can do Differential Expression analysis.
 
 # First is to change design to be more suitable
 dds$`Sex:ch1` <- factor(dds$Sex)
-dds$disease <- factor(dds$disease, levels = c("Normal", "Arthralgia", 
-                                              "Osteoarthritis", "Rheumatoid arthritis (established)", 
-                                              "Rheumatoid arthritis (early)"))
+dds$disease <- factor(dds$disease, 
+                      levels = c("Normal", "Arthralgia", "Osteoarthritis", 
+                                 "Rheumatoid arthritis (established)", 
+                                 "Rheumatoid arthritis (early)"))
 
 design(dds) <- ~ Sex + disease
 
@@ -725,8 +829,14 @@ EnhancedVolcano(
 # be happening prior to the establishment of RA.
 
 
+# 04-enrichment-analysis --------------------------------------------------
+
+
 
 # after visualization of significantly expressed genes, enrichment can occur.
+
+
+# sex KEGG enrichment and extraction --------------------------------------
 
 # starting again with sex contrast via GSEA in KEGG, trying to use ORA did not 
 # identify any significantly enriched pathways at FDR < 0.05. This reflects the
@@ -734,99 +844,209 @@ EnhancedVolcano(
 
 sig_genes_sex <- rownames(resLFCSEX)[!is.na(resLFCSEX$padj) & resLFCSEX$padj < 0.05]
 
-gene_list <- resLFCSEX$log2FoldChange
-names(gene_list) <- rownames(resLFCSEX)
-gene_list <- sort(gene_list, decreasing = TRUE)
+gene_list_sex <- resLFCSEX$log2FoldChange
+names(gene_list_sex) <- rownames(resLFCSEX)
+gene_list_sex <- sort(gene_list_sex, decreasing = TRUE)
 
-gse <- gseKEGG(
-  geneList = gene_list,
-  organism = "hsa")
+gse_sex <- gseKEGG(
+  geneList = gene_list_sex,
+  organism = "hsa", 
+  pvalueCutoff = 0.05)
 
-dotplot(gse, showCategory = 15) +
+dotplot(gse_sex, showCategory = 20) +
   ggtitle("KEGG Pathway Enrichment (Sex Differential Expression)")
-# Plot shows that ribosome shows a very strong result, 
-# which could reflect sex-differences in immune cell activation states due to
-# ribosomal activity often correlated with cellular proliferation and immune
-# activation. This makes sense with my PCA result where PC1 explains 58% of
-# of the variance and visually seperates samples by sex, meaning sex may be 
-# attrivuted to it. Other significantly strong pathways were the Systemic Lupus 
-# Erythematosus (SLE) pathways responsible for histones, ribosomal proteins, 
-# and immune-related nuclear antigens. This suggests that sex influences 
-# immune pathway architecture. Neutrophil Extracellular Trap Formation (NETF)
-# pathways were also sex-enriched which means that sex could make a difference
-# in the immune activation RA-afflicted synovial tissues. 
+
+# Plot shows that ribosome shows a very strong result. However, ribosomes show
+# up strong because they are constantly expressed and have a large gene 
+# set size, Therefore they will not be extracted and investigated. Other 
+# significantly strong and applicable pathways are the Th17 Cell 
+# Differentiation, Neutrophil Extracellular trap formation, Chemokine 
+# signalling, NF-kappa B signalling, and cytokine-cytokine receptor interaction
+# pathways. This suggests that sex influences immune pathway architecture. 
+# Neutrophil Extracellular Trap Formation (NETF) enrichment may mean that sex 
+# is able to make a difference in the immune activation RA-afflicted synovial 
+# tissues. Chemokine signalling pathway enrichment suggest that sex also plays
+# a role in the way immune cells react to inflammation. NF-kappa B signalling 
+# enrichment further implies that sex plays a significant role in the immune
+# systems response to disease.The same is argued for the enrichment of 
+# cytokne-cytokine receptor signalling pathway.
 
 # now I know significant genes, I can comb through KEGG to find their 
 # biological meaning.
 
-ribosome_genes <- strsplit(
-  gse@result$core_enrichment[gse@result$Description == "Ribosome"],
+
+# Extracting top 10 changed and statistically significant NEFT genes.
+sex_neutrophil_genes <- strsplit(
+  gse_sex@result$core_enrichment[gse_sex@result$Description == "Neutrophil extracellular trap formation"],
   "/"
 )[[1]]
 
-gene_symbols <- mapIds(
+sex_neutrophil_df <- resLFCSEX[rownames(resLFCSEX) %in% sex_neutrophil_genes, ]
+
+sex_top_neutrophil <- sex_neutrophil_df[
+  order(abs(sex_neutrophil_df$log2FoldChange), decreasing = TRUE),]
+
+sex_neutrophil_df$score <- abs(sex_neutrophil_df$log2FoldChange) * -log10(sex_neutrophil_df$padj)
+
+sex_top_neutrophil <- sex_neutrophil_df[
+  order(sex_neutrophil_df$score, decreasing = TRUE),]
+
+sex_top_neutrophil_symbols <- mapIds(
   org.Hs.eg.db,
-  keys = ribosome_genes,
+  keys = rownames(top_neutrophil)[1:10],
   column = "SYMBOL",
   keytype = "ENTREZID",
   multiVals = "first")
 
-gene_symbols
+sex_top_neutrophil_symbols
 
-# 51021        219927          6130          6128          6233          6188          6175 
-# "MRPS16"      "MRPL21"       "RPL7A"        "RPL6"      "RPS27A"        "RPS3"       "RPLP0" 
-# 9349          6202         51258          6222          9553          6134          6217 
-# "RPL23"        "RPS8"      "MRPL51"       "RPS18"      "MRPL33"       "RPL10"       "RPS16" 
-# 64978          6201          6206     100169760          6228          6218          6229 
-# "MRPL38"        "RPS7"       "RPS12"      "RNA5S9"       "RPS23"       "RPS17"       "RPS24" 
-# 10399         92259         64928          6143         51065         64981          6144 
-# "RACK1"        "KGD4"      "MRPL14"       "RPL19"      "RPS27L"      "MRPL34"       "RPL21" 
-# 6135          6154          6230          4736     100529239         55052          6164 
-# "RPL11"       "RPL26"       "RPS25"      "RPL10A" "RPS10-NUDT3"      "MRPL20"       "RPL34" 
-# 6132          6157          9045          3921         23521          6208          6155 
-# "RPL8"      "RPL27A"       "RPL14"        "RPSA"      "RPL13A"       "RPS14"       "RPL27" 
-# 64979          6122         65993          6160     106632260          6207         10573 
-# "MRPL36"        "RPL3"      "MRPS34"       "RPL31"   "RNA5-8SN1"       "RPS13"      "MRPL28" 
-# 6204          6173          6227          6147         64951         51073          6193 
-# "RPS10"      "RPL36A"       "RPS21"      "RPL23A"      "MRPS24"       "MRPL4"        "RPS5" 
-# 2197          6159        116540          6171          6231          6141          7311 
-# "FAU"       "RPL29"      "MRPL53"       "RPL41"       "RPS26"       "RPL18"       "UBA52" 
-# 6170         51116          4550          6205          6165          6210          6156 
-# "RPL39"       "MRPS2"     "MT-RNR2"       "RPS11"      "RPL35A"      "RPS15A"       "RPL30" 
-# 6169          6161          6167          6137          6168          6183         11224 
-# "RPL38"       "RPL32"       "RPL37"       "RPL13"      "RPL37A"      "MRPS12"       "RPL35" 
-# 6181         64949          6187     109910381     109864274          6203         25873 
-# "RPLP2"      "MRPS26"        "RPS2"   "RNA5-8SN3"   "RNA5-8SN4"        "RPS9"       "RPL36" 
-# 6232          6158          6176          6182     109864280         64975          6142 
-# "RPS27"       "RPL28"       "RPLP1"      "MRPL12"    "RNA18SN2"      "MRPL41"      "RPL18A" 
-# 6223          6234          6150          6209          6235     100008587     109864281 
-# "RPS19"       "RPS28"      "MRPL23"       "RPS15"       "RPS29"   "RNA5-8SN5"   "RNA5-8SN2" 
-# 4549     109910380     109864282     109864273     100008588     109864272     106631781 
-# "MT-RNR1"    "RNA18SN3"    "RNA28SN2"    "RNA18SN4"    "RNA18SN5"    "RNA28SN4"    "RNA18SN1" 
-# 6191     100008589     109910382     106632264     100169767     100169758     100169764 
-# "RPS4X"    "RNA28SN5"    "RNA28SN3"    "RNA28SN1"     "RNA5S16"      "RNA5S7"     "RNA5S13" 
-# 100169762     100169757     100169753     100169755     100169754     100169766     100169763 
-# "RNA5S11"      "RNA5S6"      "RNA5S2"      "RNA5S4"      "RNA5S3"     "RNA5S15"     "RNA5S12" 
-# 100169759     100169751     100169756     100169768     100169761     100169765 
-# "RNA5S8"      "RNA5S1"      "RNA5S5"     "RNA5S17"     "RNA5S10"     "RNA5S14"
+#     5293    23569     2209   440689   653604     8370   126961     8337   723790   333932 
+# "PIK3CD"  "PADI4" "FCGR1A" "H2BC18"  "H3C13"  "H4C14"  "H3C14" "H2AC18" "H2AC19"  "H3C15" 
 
-# checking for batch effects.
-colnames(pheno_clean2)
-# possible batch effects are "submission_date", "instrument_model", and 
-# "platform_id". Now checking to see if candidate batch effects may provide 
-# variability.
+# extracting top 10 changed and statistically significant Th17 cell 
+# differentiation genes.
+sex_th17_genes <- strsplit(
+  gse_sex@result$core_enrichment[gse_sex@result$Description == "Th17 cell differentiation"],
+  "/"
+)[[1]]
 
-table(pheno_clean2$instrument_model)
-# Illumina HiSeq 2000 
-#                 182 
+sex_th17_df <- resLFCSEX[rownames(resLFCSEX) %in% sex_th17_genes, ]
 
-table(pheno_clean2$platform_id)
-# GPL11154 
-#      182
+sex_top_th17 <- sex_th17_df[
+  order(abs(sex_th17_df$log2FoldChange), decreasing = TRUE),]
 
-table(pheno_clean2$submission_date)
-# Nov 01 2016 
-#         182
+sex_th17_df$score <- abs(sex_th17_df$log2FoldChange) * -log10(sex_th17_df$padj)
 
-# No variability found in common batch candidates.Thus concluding exploratory
-# analysis on march 8th, 2026.
+sex_top_th17 <- sex_th17_df[
+  order(sex_th17_df$score, decreasing = TRUE),]
+
+
+sex_th17_gene_symbols <- mapIds(
+  org.Hs.eg.db,
+  keys = rownames(sex_top_th17)[1:10],
+  column = "SYMBOL",
+  keytype = "ENTREZID",
+  multiVals = "first")
+
+sex_th17_gene_symbols
+
+#  3932    3725  149233    3570    6258     919    7535    3553    6772    3558 
+# "LCK"   "JUN" "IL23R"  "IL6R"  "RXRG" "CD247" "ZAP70"  "IL1B" "STAT1"   "IL2" 
+
+# extracting top 10 changed and statistically significant chemokine signalling
+# pathways genes.
+
+sex_chemokine_genes <- strsplit(
+  gse_sex@result$core_enrichment[gse_sex@result$Description == "Chemokine signaling pathway"],
+  "/"
+)[[1]]
+
+sex_chemokine_df <- resLFCSEX[rownames(resLFCSEX) %in% sex_chemokine_genes, ]
+
+sex_top_chemokine <- sex_chemokine_df[
+  order(abs(sex_chemokine_df$log2FoldChange), decreasing = TRUE),]
+
+sex_chemokine_df$score <- abs(sex_chemokine_df$log2FoldChange) * -log10(sex_chemokine_df$padj)
+
+sex_top_chemokine <- sex_chemokine_df[
+  order(sex_chemokine_df$score, decreasing = TRUE),]
+
+sex_chemokine_gene_symbols <- mapIds(
+  org.Hs.eg.db,
+  keys = rownames(sex_top_chemokine)[1:10],
+  column = "SYMBOL",
+  keytype = "ENTREZID",
+  multiVals = "first")
+
+sex_chemokine_gene_symbols
+
+#    5590     5293     2268     6375     2786     7852     6772     3579     3577     1233 
+# "PRKCZ" "PIK3CD"    "FGR"   "XCL1"   "GNG4"  "CXCR4"  "STAT1"  "CXCR2"  "CXCR1"   "CCR4" 
+
+
+# extracting top 10 changed and statistically significant NF-kappa B signalling
+# pathways genes.
+
+sex_nfkappab_genes <- strsplit(
+  gse_sex@result$core_enrichment[gse_sex@result$Description == "NF-kappa B signaling pathway"],
+  "/"
+)[[1]]
+
+sex_nfkappab_df <- resLFCSEX[rownames(resLFCSEX) %in% sex_nfkappab_genes, ]
+
+sex_top_nfkappab <- sex_nfkappab_df[
+  order(abs(sex_nfkappab_df$log2FoldChange), decreasing = TRUE),]
+
+sex_nfkappab_df$score <- abs(sex_nfkappab_df$log2FoldChange) * -log10(sex_nfkappab_df$padj)
+
+sex_top_nfkappab <- sex_nfkappab_df[
+  order(sex_nfkappab_df$score, decreasing = TRUE),]
+
+sex_nfkappab_gene_symbols <- mapIds(
+  org.Hs.eg.db,
+  keys = rownames(sex_top_nfkappab)[1:10],
+  column = "SYMBOL",
+  keytype = "ENTREZID",
+  multiVals = "first")
+
+sex_nfkappab_gene_symbols
+
+#  3932      1647      5743    128178      7535      3553      4615      3576      2919      2921 
+# "LCK" "GADD45A"   "PTGS2" "EDARADD"   "ZAP70"    "IL1B"   "MYD88"   "CXCL8"   "CXCL1"   "CXCL3"
+
+
+# extracting top 10 changed and statistically significant cytokine-cytokine 
+# receptor interaction pathways genes.
+
+sex_cytocyto_genes <- strsplit(
+  gse_sex@result$core_enrichment[gse_sex@result$Description == "Cytokine-cytokine receptor interaction"],
+  "/"
+)[[1]]
+
+sex_cytocyto_df <- resLFCSEX[rownames(resLFCSEX) %in% sex_cytocyto_genes, ]
+
+sex_top_cytocyto <- sex_cytocyto_df[
+  order(abs(sex_cytocyto_df$log2FoldChange), decreasing = TRUE),]
+
+sex_cytocyto_df$score <- abs(sex_cytocyto_df$log2FoldChange) * -log10(sex_cytocyto_df$padj)
+
+sex_top_cytocyto <- sex_cytocyto_df[
+  order(sex_cytocyto_df$score, decreasing = TRUE),]
+
+sex_cytocyto_gene_symbols <- mapIds(
+  org.Hs.eg.db,
+  keys = rownames(sex_top_cytocyto)[1:10],
+  column = "SYMBOL",
+  keytype = "ENTREZID",
+  multiVals = "first")
+
+sex_cytocyto_gene_symbols
+
+#       8784       7293       8764       3604        943       7133      58985     163702       1441 
+# "TNFRSF18"  "TNFRSF4" "TNFRSF14"  "TNFRSF9"  "TNFRSF8" "TNFRSF1B"  "IL22RA1"   "IFNLR1"    "CSF3R" 
+#  353500 
+# "BMP8A" 
+
+# comparison of important genes that appear in the most enriched pathways in 
+# KEGG enrichment of sex.
+
+all_genes_sex <- unlist(strsplit(gse_sex@result$core_enrichment, "/"))
+
+all_sexgene_symbols <- mapIds(
+  org.Hs.eg.db,
+  keys = all_genes_sex,
+  column = "SYMBOL",
+  keytype = "ENTREZID",
+  multiVals = "first")
+
+table(all_sexgene_symbols) |> sort(decreasing = TRUE)
+
+# TNF          IL1B           IL6        MAPK12        PIK3CD         IKBKG        PIK3R2 
+#  29            27            25            24            24            22            22 
+# MAPK11          HRAS           JUN        MAPK13         PRKCB           BAX         CXCL8 
+#     21            20            20            18            18            17            17 
+# LOC102723407        MAP2K2         TRAF2        CALML3        CALML5        CALML6 
+#           17            17            17            15            15            15 
+
+
+
