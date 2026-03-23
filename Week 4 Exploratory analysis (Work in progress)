@@ -28,23 +28,24 @@ bioc_packages <- c(
   "DESeq2",
   "clusterProfiler",
   "EnhancedVolcano",
-  "org.Hs.eg.db")
+  "org.Hs.eg.db", 
+  "apeglm")
 
 for (pkg in bioc_packages) {
   if (!requireNamespace(pkg, quietly = TRUE))
-    BiocManager::install(pkg)
+    install.packages(pkg)
   library(pkg, character.only = TRUE)}
 
-# Loading all libraries used so far
-library(GEOquery)
-library(DESeq2)
 library(pheatmap)
 library(RColorBrewer)
+library(ggplot2)
+library(ggpubr)
+library(GEOquery)
+library(DESeq2)
 library(clusterProfiler)
 library(EnhancedVolcano)
 library(org.Hs.eg.db)
-library(ggplot2)
-library(ggpubr)
+library(apeglm)
 
 # loading data collected so far to skip coding
 load("C:/R_Projects/GSE89408/Data/Exploratory-data-89408.RData")
@@ -198,8 +199,11 @@ ggplot(sample_df, aes(x = counts)) +
 # box plot of raw counts with log10 for easier visualization.
 boxplot(log10(counts + 1),
         outline = FALSE,
-        las = 2,
-        main = "Log10 Raw Counts per Sample")
+        las = 1,
+        par(mar = c(4.5, 4.1, 4.1, 4.5)), 
+        main = "Log10 Raw Counts per Sample", 
+        ylab = "Raw Counts amount", 
+        xlab = "Sample name")
 
 # High variance among sanples, with mean shifting per sample as well.
 
@@ -326,17 +330,26 @@ all(colnames(counts_clean2) == rownames(pheno_clean2))
 pheno_clean2$Sex <- factor(pheno_clean2$Sex)
 pheno_clean2$disease <- factor(pheno_clean2$disease)
 
+# cleaning up level factors to make column names more clean.
+pheno_clean2$disease <- factor(pheno_clean2$disease,
+                               levels = c("Normal", "Arthralgia", "Osteoarthritis",
+                                          "Rheumatoid arthritis (established)",
+                                          "Rheumatoid arthritis (early)"),
+                               labels = c("Normal", "Arthralgia", "OA", "RA_est", "RA_early"))
+
 # visualizing clean data
 table(pheno_clean2$Sex, pheno_clean2$disease)
 
-#   Arthralgia Normal Osteoarthritis Rheumatoid arthritis (early) Rheumatoid arthritis (established)
-# F          7     11              7                           33                                 63
-# M          1     12              5                           24                                 19
+#   Normal Arthralgia OA RA_est RA_early
+# F     11          7  7     63       33
+# M     12          1  5     19       24
 
 # before doing DEseq2 checking for confounding effects in age, to determine
-# if its worth investigating.
+# if its worth investigating. Making sure age is scaled to avoid collinearity.
 
-table(pheno_clean2$Sex, pheno_clean2$age > median(pheno_clean2$age))
+pheno_clean2$age_scaled <- scale(pheno_clean2$age)
+
+table(pheno_clean2$Sex, pheno_clean2$age_scaled > median(pheno_clean2$age_scaled))
 #   FALSE TRUE
 # F    60   61
 # M    33   28
@@ -344,10 +357,11 @@ table(pheno_clean2$Sex, pheno_clean2$age > median(pheno_clean2$age))
 
 # first doing DEseq2 of all applicable factors
 
+
 dds <- DESeqDataSetFromMatrix(
   countData = counts_clean2,
   colData = pheno_clean2,
-  design = ~ Sex + age + disease)
+  design = ~ age_scaled + disease * Sex)
 
 dds
 # class: DESeqDataSet 
@@ -357,25 +371,31 @@ dds
 # rownames(39376): 100287102 653635 ... 4576 4571
 # rowData names(0):
 # colnames(182): GSM2370970 GSM2370971 ... GSM2371183 GSM2371185
-# colData names(49): title geo_accession ... Sex disease
-
-# checking PCA influence to see if age contributes to
-# variance qualitatively. 
+# colData names(50): title geo_accession ... disease age_scaled
 
 # checking data before normalization
 boxplot(assay(dds),
         outline = FALSE,
-        las = 2,
-        main = "dds raw counts")
+        las = 1,
+        main = "dds raw counts per sample", 
+        ylab = "Raw RNA-seq counts", 
+        xlab = "Sample ID")
 
 # high dispersion, with somewhat normalized means.
 
+# applying DESeq2 analysis
+dds <- DESeq(dds)
+
 # Seeing if dispersion fits visually 
-plotDispEsts(dds)
+plotDispEsts((dds), 
+             main = "Dispersion Estimate for dds")
 # fitted line decently fits final dispersion, meaning a negative binomial 
 # (Deseq2) dispersion modeling.
 
-dds <- DESeq(dds)
+# Looking at dds results
+resultsNames(dds)
+
+
 vsd <- vst(dds, blind = FALSE)
 
 # checking if data is viable after normalization
@@ -506,7 +526,22 @@ topVarMat <- assay(vsd)[topGenes, ]
 # Adding sample annotations for clarity
 annotation <- as.data.frame(colData(vsd)[, c("Sex", "disease")])
 
-# Plotting heatmap
+# Plotting heatmap of top 50 gene symbols by converting IDs.
+
+top50sample_gene_symbols <- mapIds(
+  org.Hs.eg.db,
+  keys = topGenes,
+  column = "SYMBOL",
+  keytype = "ENTREZID",
+  multiVals = "first")
+
+# Replacing rownames with gene symbols
+rownames(topVarMat) <- top50sample_gene_symbols
+
+# Removing genes that failed to map (NA symbols)
+topVarMat <- topVarMat[!is.na(rownames(topVarMat)), ]
+
+# Plot heatmap with symbols
 pheatmap(topVarMat,
          cluster_rows = TRUE,
          cluster_cols = TRUE,
@@ -514,7 +549,8 @@ pheatmap(topVarMat,
          annotation_col = annotation,
          scale = "row",
          color = colorRampPalette(rev(brewer.pal(9, "RdBu")))(255),
-         main = "Top 50 variable genes across samples")
+         main = "Top 50 Variable Genes Across Samples")
+
 # This filters out genes that are mostly similar across all groups, 
 # which can provide clarity. Genes 7404-6192 are very up-regulated
 # in males and somewhat down-regulated in females, while the opposite
@@ -572,19 +608,11 @@ table(pheno_clean2$submission_date)
 # Now that some gene groupings are identified and batch effects are checked
 # I can do Differential Expression analysis.
 
-# First is to change design to be more suitable
-dds$`Sex:ch1` <- factor(dds$Sex)
-dds$disease <- factor(dds$disease, 
-                      levels = c("Normal", "Arthralgia", "Osteoarthritis", 
-                                 "Rheumatoid arthritis (established)", 
-                                 "Rheumatoid arthritis (early)"))
-
-design(dds) <- ~ Sex + disease
-
+# first checking tables to see if dataset has correct order
 table(dds$Sex, dds$disease)
-#   Normal Arthralgia Osteoarthritis Rheumatoid arthritis (established) Rheumatoid arthritis (early)
-# F     11          7              7                                 63                           33
-# M     12          1              5                                 19                           24
+#   Normal Arthralgia OA RA_est RA_early
+# F     11          7  7     63       33
+# M     12          1  5     19       24
 
 # table looks correct
 
@@ -593,240 +621,387 @@ table(dds$Sex, dds$disease)
 # First getting result names so I know what to contrast
 
 resultsNames(dds)
-# [1] "Intercept"                                            "Sex_M_vs_F"                                          
-# [3] "disease_Arthralgia_vs_Normal"                         "disease_Osteoarthritis_vs_Normal"                    
-# [5] "disease_Rheumatoid.arthritis..established._vs_Normal" "disease_Rheumatoid.arthritis..early._vs_Normal"
+# [1] "Intercept"                    "age_scaled"                   "disease_Arthralgia_vs_Normal"
+# [4] "disease_OA_vs_Normal"         "disease_RA_est_vs_Normal"     "disease_RA_early_vs_Normal"  
+# [7] "Sex_M_vs_F"                   "diseaseArthralgia.SexM"       "diseaseOA.SexM"              
+# [10] "diseaseRA_est.SexM"           "diseaseRA_early.SexM" 
 
-# Now contrasting Established Ra and Normal Gene expression using Log Fold Change.
-
-resLFCRAest <- results(dds,
-                  name = "disease_Rheumatoid.arthritis..established._vs_Normal",
-                  lfcThreshold = 1,
-                  alpha = 0.05, 
-                  altHypothesis = "greaterAbs")
-
-summary(resLFCRAest)
-
-# out of 39365 with nonzero total read count
-# adjusted p-value < 0.05
-# LFC > 1.00 (up)    : 2503, 6.4%
-# LFC < -1.00 (down) : 3305, 8.4%
-# outliers [1]       : 331, 0.84%
-# low counts [2]     : 3805, 9.7%
-# (mean count < 1)
-
-# Approximately 15% of expressed genes demonstrated significant >2-fold 
-# differential expression in established RA compared to Normal controls, which
-# highlights extensive molecular reprogramming associated with chronic 
-# inflammatory pathology.
-
-# Now contrasting Early Ra and Normal using Gene expression Log Fold Change.
-
-resLFCRAear <- results(dds,
-                       name = "disease_Rheumatoid.arthritis..early._vs_Normal",
-                       lfcThreshold = 1,
-                       alpha = 0.05, 
-                       altHypothesis = "greaterAbs")
-
-summary(resLFCRAear)
-
-# out of 39365 with nonzero total read count
-# adjusted p-value < 0.05
-# LFC > 1.00 (up)    : 1596, 4.1%
-# LFC < -1.00 (down) : 2886, 7.3%
-# outliers [1]       : 331, 0.84%
-# low counts [2]     : 3046, 7.7%
-# (mean count < 1)
-
-# Approximately 11% of expressed genes demonstrated significant >2-fold 
-# differential expression in early RA compared to Normal controls, which
-# indicates transcriptional dysregulation is already present at early disease
-# stages, lesser than what is observed in established RA.
-
-# Now contrasting Osteoarthritis and Normal Gene expression using Log Fold Change.
-resLFCOST <- results(dds,
-                       name = "disease_Osteoarthritis_vs_Normal",
-                       lfcThreshold = 1,
-                       alpha = 0.05, 
-                       altHypothesis = "greaterAbs")
-
-summary(resLFCOST)
-
-# out of 39365 with nonzero total read count
-# adjusted p-value < 0.05
-# LFC > 1.00 (up)    : 12, 0.03%
-# LFC < -1.00 (down) : 3, 0.0076%
-# outliers [1]       : 331, 0.84%
-# low counts [2]     : 0, 0%
-# (mean count < 0)
-
-# Approximately 0.04% of expressed genes demonstrated significant >2-fold 
-# differential expression in Osteoarthritis compared to Normal controls, which
-# suggests that there is minimal large-scale transcriptional disruption 
-# compared to normal synovial tissue. OA may not behave the same 
-# way as RA transcriptionally
-
-# Now contrasting Arthralgia and Normal Gene expression using Log Fold Change.
-resLFCARTH <- results(dds,
-                     name = "disease_Arthralgia_vs_Normal",
-                     lfcThreshold = 1,
-                     alpha = 0.05, 
-                     altHypothesis = "greaterAbs")
-
-summary(resLFCARTH)
-
-# out of 39365 with nonzero total read count
-# adjusted p-value < 0.05
-# LFC > 1.00 (up)    : 978, 2.5%
-# LFC < -1.00 (down) : 3985, 10%
-# outliers [1]       : 331, 0.84%
-# low counts [2]     : 5321, 14%
-# (mean count < 1)
-
-# Approximately 13% of expressed genes demonstrated significant >2-fold 
-# differential expression in Arthralgia compared to Normal controls, which
-# may reflect transcriptional alteration representing early inflammatory 
-# or pre-rheumatoid transcriptional activity. Down-regulation is significantly
-# more prevalent than up-regulation, which may be worth looking into in 
-# future studies.
-
-# Now contrasting Male and Female Gene expression using Log Fold Change.
-
-resLFCSEX <- results(dds,
-                       name = "Sex_M_vs_F",
-                       lfcThreshold = 1,
-                       alpha = 0.05, 
-                       altHypothesis = "greaterAbs")
-
-summary(resLFCSEX)
-
-# out of 39365 with nonzero total read count
-# adjusted p-value < 0.05
-# LFC > 1.00 (up)    : 44, 0.11%
-# LFC < -1.00 (down) : 2, 0.0051%
-# outliers [1]       : 331, 0.84%
-# low counts [2]     : 0, 0%
-# (mean count < 0)
-
-# Approximately 0.12% of expressed genes demonstrated significant >2-fold 
-# differential expression between male and female samples, which
-# suggests that sex plays little to no role in large-scale transcriptional
-# variation when disease status is controlled for.
+# RAest-DGEA --------------------------------------------------------------
 
 
+# Now contrasting with RAest vs normal in females
+
+res_RAest_F <- results(dds, name = "disease_RA_est_vs_Normal")
+
+# then checking RAest vs normal in males for interactions
+
+res_RAest_Mint <- results(dds, name = "diseaseRA_est.SexM")
+
+res_RAest_M <- results(dds,
+                       contrast = list(c("disease_RA_est_vs_Normal",
+                                         "diseaseRA_est.SexM")))
+
+# Now filtering results
+
+sig_RAest_F <- res_RAest_F[
+  !is.na(res_RAest_F$padj) &
+    res_RAest_F$padj < 0.05 &
+    abs(res_RAest_F$log2FoldChange) > 0.5,]
+
+sig_RAest_M <- res_RAest_M[
+  !is.na(res_RAest_M$padj) &
+    res_RAest_M$padj < 0.05 &
+    abs(res_RAest_M$log2FoldChange) > 0.5,]
+
+sig_RAest_Mint <- res_RAest_Mint[
+  !is.na(res_RAest_Mint$padj) &
+    res_RAest_Mint$padj < 0.05 &
+    abs(res_RAest_Mint$log2FoldChange) > 0.5,]
+
+# Overlap analysis of RAest genes
+
+RAest_common_genes <- intersect(rownames(sig_RAest_F), rownames(sig_RAest_M))
+RAest_female_only <- setdiff(rownames(sig_RAest_F), rownames(sig_RAest_M))
+RAest_male_only <- setdiff(rownames(sig_RAest_M), rownames(sig_RAest_F))
+
+# now compiling results for GSEA later.
+
+genelist_RAest_F <- res_RAest_F$log2FoldChange
+names(genelist_RAest_F) <- rownames(res_RAest_F)
+genelist_RAest_F <- sort(genelist_RAest_F, decreasing = TRUE)
+
+genelist_RAest_M <- res_RAest_M$log2FoldChange
+names(genelist_RAest_M) <- rownames(res_RAest_M)
+genelist_RAest_M <- sort(genelist_RAest_M, decreasing = TRUE)
+
+genelist_RAest_Mint <- res_RAest_Mint$log2FoldChange
+names(genelist_RAest_Mint) <- rownames(res_RAest_Mint)
+genelist_RAest_Mint <- sort(genelist_RAest_Mint, decreasing = TRUE)
+
+# then plotting established RA contrasts
+
+# starting with plotting female contrasts
+EnhancedVolcano(
+  res_RAest_F,
+  lab = rownames(res_RAest_F),
+  x = 'log2FoldChange',
+  y = 'padj',
+  title = 'Female Established RA vs Normal',
+  pCutoff = 0.05,
+  FCcutoff = 1,
+  pointSize = 2.5,
+  labSize = 3,
+  colAlpha = 0.8)
+
+# then plotting male contrasts
+EnhancedVolcano(
+  res_RAest_M,
+  lab = rownames(res_RAest_M),
+  x = 'log2FoldChange',
+  y = 'padj',
+  title =  'Male Established RA vs Normal',
+  pCutoff = 0.05,
+  FCcutoff = 1,
+  pointSize = 2.5,
+  labSize = 3,
+  colAlpha = 0.8)
+
+# Then plotting sex interactions
+EnhancedVolcano(
+  res_RAest_Mint,
+  lab = rownames(res_RAest_Mint),
+  x = 'log2FoldChange',
+  y = 'padj',
+  title = 'sex interactions in Established RA vs Normal',
+  pCutoff = 0.05,
+  FCcutoff = 1,
+  pointSize = 2.5,
+  labSize = 3,
+  colAlpha = 0.8)
+
+
+# RAear-DGEA --------------------------------------------------------------
+
+
+# Now contrasting with RAear vs normal in females
+
+res_RAear_F <- results(dds, name = "disease_RA_early_vs_Normal")
+
+# then checking RAear vs normal in males for interactions
+
+res_RAear_Mint <- results(dds, name = "diseaseRA_early.SexM")
+
+res_RAear_M <- results(dds,
+                       contrast = list(c("disease_RA_early_vs_Normal",
+                                         "diseaseRA_early.SexM")))
+
+# Now filtering results
+
+sig_RAear_F <- res_RAear_F[
+  !is.na(res_RAear_F$padj) &
+    res_RAear_F$padj < 0.05 &
+    abs(res_RAear_F$log2FoldChange) > 0.5,]
+
+sig_RAear_M <- res_RAear_M[
+  !is.na(res_RAear_M$padj) &
+    res_RAear_M$padj < 0.05 &
+    abs(res_RAear_M$log2FoldChange) > 0.5,]
+
+sig_RAear_Mint <- res_RAear_Mint[
+  !is.na(res_RAear_Mint$padj) &
+    res_RAear_Mint$padj < 0.05 &
+    abs(res_RAear_Mint$log2FoldChange) > 0.5,]
+
+# Overlap analysis of RAear genes
+
+RAear_common_genes <- intersect(rownames(sig_RAear_F), rownames(sig_RAear_M))
+RAear_female_only <- setdiff(rownames(sig_RAear_F), rownames(sig_RAear_M))
+RAear_male_only <- setdiff(rownames(sig_RAear_M), rownames(sig_RAear_F))
+
+# now compiling results 
+
+genelist_RAear_F <- res_RAear_F$log2FoldChange
+names(genelist_RAear_F) <- rownames(res_RAear_F)
+genelist_RAear_F <- sort(genelist_RAear_F, decreasing = TRUE)
+
+genelist_RAear_M <- res_RAear_M$log2FoldChange
+names(genelist_RAear_M) <- rownames(res_RAear_M)
+genelist_RAear_M <- sort(genelist_RAear_M, decreasing = TRUE)
+
+genelist_RAear_Mint <- res_RAear_Mint$log2FoldChange
+names(genelist_RAear_Mint) <- rownames(res_RAear_Mint)
+genelist_RAear_Mint <- sort(genelist_RAear_Mint, decreasing = TRUE)
+
+# then plotting early RA contrasts
+
+# starting with plotting female contrasts
+EnhancedVolcano(
+  res_RAear_F,
+  lab = rownames(res_RAear_F),
+  x = 'log2FoldChange',
+  y = 'padj',
+  title = 'Female Early RA vs Normal',
+  pCutoff = 0.05,
+  FCcutoff = 1,
+  pointSize = 2.5,
+  labSize = 3,
+  colAlpha = 0.8)
+
+# then plotting male contrasts
+EnhancedVolcano(
+  res_RAear_M,
+  lab = rownames(res_RAear_M),
+  x = 'log2FoldChange',
+  y = 'padj',
+  title =  'Male Early RA vs Normal',
+  pCutoff = 0.05,
+  FCcutoff = 1,
+  pointSize = 2.5,
+  labSize = 3,
+  colAlpha = 0.8)
+
+# Then plotting sex interactions
+EnhancedVolcano(
+  res_RAear_Mint,
+  lab = rownames(res_RAear_Mint),
+  x = 'log2FoldChange',
+  y = 'padj',
+  title = 'sex interactions in Early RA vs Normal',
+  pCutoff = 0.05,
+  FCcutoff = 1,
+  pointSize = 2.5,
+  labSize = 3,
+  colAlpha = 0.8)
+
+
+# OA-DGEA -----------------------------------------------------------------
+
+# Now contrasting with OA vs normal in females
+
+res_OA_F <- results(dds, name = "disease_OA_vs_Normal")
+
+# then checking OA vs normal in males for interactions
+
+res_OA_Mint <- results(dds, name = "diseaseOA.SexM")
+
+res_OA_M <- results(dds,
+                       contrast = list(c("disease_OA_vs_Normal",
+                                         "diseaseOA.SexM")))
+
+# Now filtering results
+
+sig_OA_F <- res_OA_F[
+  !is.na(res_OA_F$padj) &
+    res_OA_F$padj < 0.05 &
+    abs(res_OA_F$log2FoldChange) > 0.5,]
+
+sig_OA_M <- res_OA_M[
+  !is.na(res_OA_M$padj) &
+    res_OA_M$padj < 0.05 &
+    abs(res_OA_M$log2FoldChange) > 0.5,]
+
+sig_OA_Mint <- res_OA_Mint[
+  !is.na(res_OA_Mint$padj) &
+    res_OA_Mint$padj < 0.05 &
+    abs(res_OA_Mint$log2FoldChange) > 0.5,]
+
+# Overlap analysis of OA genes
+
+OA_common_genes <- intersect(rownames(sig_OA_F), rownames(sig_OA_M))
+OA_female_only <- setdiff(rownames(sig_OA_F), rownames(sig_OA_M))
+OA_male_only <- setdiff(rownames(sig_OA_M), rownames(sig_OA_F))
+
+# now compiling results 
+
+genelist_OA_F <- res_OA_F$log2FoldChange
+names(genelist_OA_F) <- rownames(res_OA_F)
+genelist_OA_F <- sort(genelist_OA_F, decreasing = TRUE)
+
+genelist_OA_M <- res_OA_M$log2FoldChange
+names(genelist_OA_M) <- rownames(res_OA_M)
+genelist_OA_M <- sort(genelist_OA_M, decreasing = TRUE)
+
+genelist_OA_Mint <- res_OA_Mint$log2FoldChange
+names(genelist_OA_Mint) <- rownames(res_OA_Mint)
+genelist_OA_Mint <- sort(genelist_OA_Mint, decreasing = TRUE)
+
+# then plotting OA contrasts
+
+# starting with plotting female contrasts
+EnhancedVolcano(
+  res_OA_F,
+  lab = rownames(res_OA_F),
+  x = 'log2FoldChange',
+  y = 'padj',
+  title = 'Female OA vs Normal',
+  pCutoff = 0.05,
+  FCcutoff = 1,
+  pointSize = 2.5,
+  labSize = 3,
+  colAlpha = 0.8)
+
+# then plotting male contrasts
+EnhancedVolcano(
+  res_OA_M,
+  lab = rownames(res_OA_M),
+  x = 'log2FoldChange',
+  y = 'padj',
+  title =  'Male OA vs Normal',
+  pCutoff = 0.05,
+  FCcutoff = 1,
+  pointSize = 2.5,
+  labSize = 3,
+  colAlpha = 0.8)
+
+# Then plotting sex interactions
+EnhancedVolcano(
+  res_OA_Mint,
+  lab = rownames(res_OA_Mint),
+  x = 'log2FoldChange',
+  y = 'padj',
+  title = 'sex interactions in OA vs Normal',
+  pCutoff = 0.05,
+  FCcutoff = 1,
+  pointSize = 2.5,
+  labSize = 3,
+  colAlpha = 0.8)
+
+
+# ARTH-DGEA -----------------------------------------------------------------
+
+# Now contrasting with OA vs normal in females
+
+res_ARTH_F <- results(dds, name = "disease_Arthralgia_vs_Normal")
+
+# then checking OA vs normal in males for interactions
+
+res_ARTH_Mint <- results(dds, name = "diseaseArthralgia.SexM" )
+
+res_ARTH_M <- results(dds,
+                    contrast = list(c("disease_Arthralgia_vs_Normal",
+                                      "diseaseArthralgia.SexM" )))
+
+# Now filtering results
+
+sig_ARTH_F <- res_ARTH_F[
+  !is.na(res_ARTH_F$padj) &
+    res_ARTH_F$padj < 0.05 &
+    abs(res_ARTH_F$log2FoldChange) > 0.5,]
+
+sig_ARTH_M <- res_ARTH_M[
+  !is.na(res_ARTH_M$padj) &
+    res_ARTH_M$padj < 0.05 &
+    abs(res_ARTH_M$log2FoldChange) > 0.5,]
+
+sig_ARTH_Mint <- res_ARTH_Mint[
+  !is.na(res_ARTH_Mint$padj) &
+    res_ARTH_Mint$padj < 0.05 &
+    abs(res_ARTH_Mint$log2FoldChange) > 0.5,]
+
+# Overlap analysis of OA genes
+
+ARTH_common_genes <- intersect(rownames(sig_ARTH_F), rownames(sig_ARTH_M))
+ARTH_female_only <- setdiff(rownames(sig_ARTH_F), rownames(sig_ARTH_M))
+ARTH_male_only <- setdiff(rownames(sig_ARTH_M), rownames(sig_ARTH_F))
+
+# now compiling results 
+
+genelist_ARTH_F <- res_ARTH_F$log2FoldChange
+names(genelist_ARTH_F) <- rownames(res_ARTH_F)
+genelist_ARTH_F <- sort(genelist_ARTH_F, decreasing = TRUE)
+
+genelist_ARTH_M <- res_ARTH_M$log2FoldChange
+names(genelist_ARTH_M) <- rownames(res_ARTH_M)
+genelist_ARTH_M <- sort(genelist_ARTH_M, decreasing = TRUE)
+
+genelist_ARTH_Mint <- res_ARTH_Mint$log2FoldChange
+names(genelist_ARTH_Mint) <- rownames(res_ARTH_Mint)
+genelist_ARTH_Mint <- sort(genelist_ARTH_Mint, decreasing = TRUE)
+
+# then plotting OA contrasts
+
+# starting with plotting female contrasts
+EnhancedVolcano(
+  res_ARTH_F,
+  lab = rownames(res_ARTH_F),
+  x = 'log2FoldChange',
+  y = 'padj',
+  title = 'Female Arthralgia vs Normal',
+  pCutoff = 0.05,
+  FCcutoff = 1,
+  pointSize = 2.5,
+  labSize = 3,
+  colAlpha = 0.8)
+
+# then plotting male contrasts
+EnhancedVolcano(
+  res_ARTH_M,
+  lab = rownames(res_ARTH_M),
+  x = 'log2FoldChange',
+  y = 'padj',
+  title =  'Male Arthralgia vs Normal',
+  pCutoff = 0.05,
+  FCcutoff = 1,
+  pointSize = 2.5,
+  labSize = 3,
+  colAlpha = 0.8)
+
+# Then plotting sex interactions
+EnhancedVolcano(
+  res_ARTH_Mint,
+  lab = rownames(res_ARTH_Mint),
+  x = 'log2FoldChange',
+  y = 'padj',
+  title = 'sex interactions in Arthralgia vs Normal',
+  pCutoff = 0.05,
+  FCcutoff = 1,
+  pointSize = 2.5,
+  labSize = 3,
+  colAlpha = 0.8)
 
 # After combing through controlled contrasted gene expression, visualization 
 # of gene expression through volcano plots can help give a good idea
 # of what genes to target in KEGG enrichment.
-
-# starting with plot of Sex contrast
-
-EnhancedVolcano(
-  resLFCSEX,
-  lab = rownames(resLFCSEX), 
-  x = 'log2FoldChange',
-  y = 'padj',
-  title = 'Differential Expression: Male vs Female',
-  pCutoff = 0.05,
-  FCcutoff = 1,
-  pointSize = 2.5,
-  labSize = 3,
-  colAlpha = 0.8)
-
-# This plot shows some genes having statistically significant results for 
-# both adjusted p-values below 0.05 and log2 fold changes. Most of which 
-# show very strong up-regulation, with log2 fold changes exceeding 5 with
-# highly significant p-values. Suggesting that there are few but strong
-# transcriptional differences between sexes based off of the samples
-# of this study. The sex differences can be related to immune-pathways,
-# possibly hinting to a difference in the way RA is presented between the
-# sexes.
-
-# then plotting established RA and Normal contrast
-
-EnhancedVolcano(
-  resLFCRAest,
-  lab = rownames(resLFCRAest),
-  x = 'log2FoldChange',
-  y = 'padj',
-  title = 'Differential Expression: Established RA vs Normal',
-  pCutoff = 0.05,
-  FCcutoff = 1,
-  pointSize = 2.5,
-  labSize = 3,
-  colAlpha = 0.8)
-
-# This plot shows that numerous genes exhibit statistically significant 
-# adjusted p-values below 0.005 and large log2 fold changes. Several of which 
-# demonstrate strong up-regulation  in RA samples, with log2 fold changes 
-# exceeding 10 and highly significant p-values. This suggests that extensive 
-# transcriptional changes associated with established RA. The predominance 
-# of positively shifted genes indicates an increased expression of inflammatory
-# or immune-related pathways, which is consistent with the chronic inflammatory
-# nature of RA. Main take-aways are; many genes are significantly different, 
-# with more having strong positive fold changes, with few having large fold 
-# changes over 10.
-
-# then plotting early RA and Normal contrast
-
-EnhancedVolcano(
-  resLFCRAear, 
-  lab = rownames(resLFCRAear),
-  x = 'log2FoldChange',
-  y = 'padj',
-  title = 'Differential Expression: Early RA vs Normal',
-  pCutoff = 0.05,
-  FCcutoff = 1,
-  pointSize = 2.5,
-  labSize = 3,
-  colAlpha = 0.8)
-
-# This plot shows similar results to the establish RA vs normal results. 
-# with pretty similar adjusted p-value below 0.05 and log2 fold change results. 
-# Which in turns suggests that early vs established RA may not express immune
-# pathways very differently.
-
-# then plotting OA and Normal contrast
-
-EnhancedVolcano(
-  resLFCOST,
-  lab = rownames(resLFCOST),
-  x = 'log2FoldChange',
-  y = 'padj',
-  title = 'Differential Expression: OA vs Normal',
-  pCutoff = 0.05,
-  FCcutoff = 1,
-  pointSize = 2.5,
-  labSize = 3,
-  colAlpha = 0.8)
-
-# This plot shows that most genes fail to reach statistical significance, 
-# which indicates that global gene expression patterns remain relatively 
-# similar between OA and normal tissues. A small number of genes exhibit
-# strong up-regulation which suggests that specific pathways may still be
-# involved in OA pathology, although the magnitude of transcriptomic changes
-# appears small than what is observed in RA.
-
-# then plotting ARTH and Normal contrast
-
-EnhancedVolcano(
-  resLFCARTH,
-  lab = rownames(resLFCARTH),
-  x = 'log2FoldChange',
-  y = 'padj',
-  title = 'Differential Expression: Arthalgia vs Normal',
-  pCutoff = 0.05,
-  FCcutoff = 1,
-  pointSize = 2.5,
-  labSize = 3,
-  colAlpha = 0.8)
-
-# This plot shows that even in early inflammatory stages still shows
-# significantly differentially expressed genes, which indicates that 
-# transcriptional changes may begin early in the diseases pathology. 
-# Both up-regulated and down regulated genes are present, which suggests 
-# that early inflammatory signaling or immune dysregulation may already 
-# be happening prior to the establishment of RA.
 
 
 # 04-enrichment-analysis --------------------------------------------------
@@ -836,217 +1011,71 @@ EnhancedVolcano(
 # after visualization of significantly expressed genes, enrichment can occur.
 
 
-# sex KEGG enrichment and extraction --------------------------------------
+# RAest KEGG enrichment and extraction ------------------------------------
 
-# starting again with sex contrast via GSEA in KEGG, trying to use ORA did not 
-# identify any significantly enriched pathways at FDR < 0.05. This reflects the
-# relatively small number of DEGs and limited functional clustering.
+gse_RAest_F <- gseKEGG(geneList = genelist_RAest_F, organism = "hsa")
 
-sig_genes_sex <- rownames(resLFCSEX)[!is.na(resLFCSEX$padj) & resLFCSEX$padj < 0.05]
+dotplot(gse_RAest_F, showCategory = 10) +
+  ggtitle("KEGG enriched Female RAest Pathways")
 
-gene_list_sex <- resLFCSEX$log2FoldChange
-names(gene_list_sex) <- rownames(resLFCSEX)
-gene_list_sex <- sort(gene_list_sex, decreasing = TRUE)
+gse_RAest_M <- gseKEGG(geneList = genelist_RAest_M, organism = "hsa")
 
-gse_sex <- gseKEGG(
-  geneList = gene_list_sex,
-  organism = "hsa", 
-  pvalueCutoff = 0.05)
+dotplot(gse_RAest_M, showCategory = 10) +
+  ggtitle("KEGG enriched Male RAest Pathways")
 
-dotplot(gse_sex, showCategory = 20) +
-  ggtitle("KEGG Pathway Enrichment (Sex Differential Expression)")
+gse_RAest_Mint <- gseKEGG(geneList = genelist_RAest_Mint, organism = "hsa")
 
-# Plot shows that ribosome shows a very strong result. However, ribosomes show
-# up strong because they are constantly expressed and have a large gene 
-# set size, Therefore they will not be extracted and investigated. Other 
-# significantly strong and applicable pathways are the Th17 Cell 
-# Differentiation, Neutrophil Extracellular trap formation, Chemokine 
-# signalling, NF-kappa B signalling, and cytokine-cytokine receptor interaction
-# pathways. This suggests that sex influences immune pathway architecture. 
-# Neutrophil Extracellular Trap Formation (NETF) enrichment may mean that sex 
-# is able to make a difference in the immune activation RA-afflicted synovial 
-# tissues. Chemokine signalling pathway enrichment suggest that sex also plays
-# a role in the way immune cells react to inflammation. NF-kappa B signalling 
-# enrichment further implies that sex plays a significant role in the immune
-# systems response to disease.The same is argued for the enrichment of 
-# cytokne-cytokine receptor signalling pathway.
-
-# now I know significant genes, I can comb through KEGG to find their 
-# biological meaning.
+dotplot(gse_RAest_Mint, showCategory = 10) +
+  ggtitle("KEGG enriched Sex interaction in RAest Pathways")
 
 
-# Extracting top 10 changed and statistically significant NEFT genes.
-sex_neutrophil_genes <- strsplit(
-  gse_sex@result$core_enrichment[gse_sex@result$Description == "Neutrophil extracellular trap formation"],
-  "/"
-)[[1]]
+# RAear KEGG enrichment and extraction ------------------------------------
 
-sex_neutrophil_df <- resLFCSEX[rownames(resLFCSEX) %in% sex_neutrophil_genes, ]
+gse_RAear_F <- gseKEGG(geneList = genelist_RAear_F, organism = "hsa")
 
-sex_top_neutrophil <- sex_neutrophil_df[
-  order(abs(sex_neutrophil_df$log2FoldChange), decreasing = TRUE),]
+dotplot(gse_RAear_F, showCategory = 10) +
+  ggtitle("KEGG enriched Female RAear Pathways")
 
-sex_neutrophil_df$score <- abs(sex_neutrophil_df$log2FoldChange) * -log10(sex_neutrophil_df$padj)
+gse_RAear_M <- gseKEGG(geneList = genelist_RAear_M, organism = "hsa")
 
-sex_top_neutrophil <- sex_neutrophil_df[
-  order(sex_neutrophil_df$score, decreasing = TRUE),]
+dotplot(gse_RAear_M, showCategory = 10) +
+  ggtitle("KEGG enriched Male RAear Pathways")
 
-sex_top_neutrophil_symbols <- mapIds(
-  org.Hs.eg.db,
-  keys = rownames(top_neutrophil)[1:10],
-  column = "SYMBOL",
-  keytype = "ENTREZID",
-  multiVals = "first")
+gse_RAear_Mint <- gseKEGG(geneList = genelist_RAear_Mint, organism = "hsa")
 
-sex_top_neutrophil_symbols
+dotplot(gse_RAear_Mint, showCategory = 10) +
+  ggtitle("KEGG enriched Sex interaction in RAear Pathways")
 
-#     5293    23569     2209   440689   653604     8370   126961     8337   723790   333932 
-# "PIK3CD"  "PADI4" "FCGR1A" "H2BC18"  "H3C13"  "H4C14"  "H3C14" "H2AC18" "H2AC19"  "H3C15" 
+# OA KEGG enrichment and extraction ---------------------------------------
 
-# extracting top 10 changed and statistically significant Th17 cell 
-# differentiation genes.
-sex_th17_genes <- strsplit(
-  gse_sex@result$core_enrichment[gse_sex@result$Description == "Th17 cell differentiation"],
-  "/"
-)[[1]]
+gse_OA_F <- gseKEGG(geneList = genelist_OA_F, organism = "hsa")
 
-sex_th17_df <- resLFCSEX[rownames(resLFCSEX) %in% sex_th17_genes, ]
+dotplot(gse_OA_F, showCategory = 10) +
+  ggtitle("KEGG enriched Female OA Pathways")
 
-sex_top_th17 <- sex_th17_df[
-  order(abs(sex_th17_df$log2FoldChange), decreasing = TRUE),]
+gse_OA_M <- gseKEGG(geneList = genelist_OA_M, organism = "hsa")
 
-sex_th17_df$score <- abs(sex_th17_df$log2FoldChange) * -log10(sex_th17_df$padj)
+dotplot(gse_OA_M, showCategory = 10) +
+  ggtitle("KEGG enriched Male OA Pathways")
 
-sex_top_th17 <- sex_th17_df[
-  order(sex_th17_df$score, decreasing = TRUE),]
+gse_OA_Mint <- gseKEGG(geneList = genelist_OA_Mint, organism = "hsa")
 
+dotplot(gse_OA_Mint, showCategory = 10) +
+  ggtitle("KEGG enriched Sex interaction in OA Pathways")
 
-sex_th17_gene_symbols <- mapIds(
-  org.Hs.eg.db,
-  keys = rownames(sex_top_th17)[1:10],
-  column = "SYMBOL",
-  keytype = "ENTREZID",
-  multiVals = "first")
+# ARTH KEGG enrichment and extraction -------------------------------------
 
-sex_th17_gene_symbols
+gse_ARTH_F <- gseKEGG(geneList = genelist_ARTH_F, organism = "hsa")
 
-#  3932    3725  149233    3570    6258     919    7535    3553    6772    3558 
-# "LCK"   "JUN" "IL23R"  "IL6R"  "RXRG" "CD247" "ZAP70"  "IL1B" "STAT1"   "IL2" 
+dotplot(gse_ARTH_F, showCategory = 10) +
+  ggtitle("KEGG enriched Female ARTH Pathways")
 
-# extracting top 10 changed and statistically significant chemokine signalling
-# pathways genes.
+gse_ARTH_M <- gseKEGG(geneList = genelist_ARTH_M, organism = "hsa")
 
-sex_chemokine_genes <- strsplit(
-  gse_sex@result$core_enrichment[gse_sex@result$Description == "Chemokine signaling pathway"],
-  "/"
-)[[1]]
+dotplot(gse_ARTH_M, showCategory = 10) +
+  ggtitle("KEGG enriched Male ARTH Pathways")
 
-sex_chemokine_df <- resLFCSEX[rownames(resLFCSEX) %in% sex_chemokine_genes, ]
+gse_ARTH_Mint <- gseKEGG(geneList = genelist_ARTH_Mint, organism = "hsa")
 
-sex_top_chemokine <- sex_chemokine_df[
-  order(abs(sex_chemokine_df$log2FoldChange), decreasing = TRUE),]
-
-sex_chemokine_df$score <- abs(sex_chemokine_df$log2FoldChange) * -log10(sex_chemokine_df$padj)
-
-sex_top_chemokine <- sex_chemokine_df[
-  order(sex_chemokine_df$score, decreasing = TRUE),]
-
-sex_chemokine_gene_symbols <- mapIds(
-  org.Hs.eg.db,
-  keys = rownames(sex_top_chemokine)[1:10],
-  column = "SYMBOL",
-  keytype = "ENTREZID",
-  multiVals = "first")
-
-sex_chemokine_gene_symbols
-
-#    5590     5293     2268     6375     2786     7852     6772     3579     3577     1233 
-# "PRKCZ" "PIK3CD"    "FGR"   "XCL1"   "GNG4"  "CXCR4"  "STAT1"  "CXCR2"  "CXCR1"   "CCR4" 
-
-
-# extracting top 10 changed and statistically significant NF-kappa B signalling
-# pathways genes.
-
-sex_nfkappab_genes <- strsplit(
-  gse_sex@result$core_enrichment[gse_sex@result$Description == "NF-kappa B signaling pathway"],
-  "/"
-)[[1]]
-
-sex_nfkappab_df <- resLFCSEX[rownames(resLFCSEX) %in% sex_nfkappab_genes, ]
-
-sex_top_nfkappab <- sex_nfkappab_df[
-  order(abs(sex_nfkappab_df$log2FoldChange), decreasing = TRUE),]
-
-sex_nfkappab_df$score <- abs(sex_nfkappab_df$log2FoldChange) * -log10(sex_nfkappab_df$padj)
-
-sex_top_nfkappab <- sex_nfkappab_df[
-  order(sex_nfkappab_df$score, decreasing = TRUE),]
-
-sex_nfkappab_gene_symbols <- mapIds(
-  org.Hs.eg.db,
-  keys = rownames(sex_top_nfkappab)[1:10],
-  column = "SYMBOL",
-  keytype = "ENTREZID",
-  multiVals = "first")
-
-sex_nfkappab_gene_symbols
-
-#  3932      1647      5743    128178      7535      3553      4615      3576      2919      2921 
-# "LCK" "GADD45A"   "PTGS2" "EDARADD"   "ZAP70"    "IL1B"   "MYD88"   "CXCL8"   "CXCL1"   "CXCL3"
-
-
-# extracting top 10 changed and statistically significant cytokine-cytokine 
-# receptor interaction pathways genes.
-
-sex_cytocyto_genes <- strsplit(
-  gse_sex@result$core_enrichment[gse_sex@result$Description == "Cytokine-cytokine receptor interaction"],
-  "/"
-)[[1]]
-
-sex_cytocyto_df <- resLFCSEX[rownames(resLFCSEX) %in% sex_cytocyto_genes, ]
-
-sex_top_cytocyto <- sex_cytocyto_df[
-  order(abs(sex_cytocyto_df$log2FoldChange), decreasing = TRUE),]
-
-sex_cytocyto_df$score <- abs(sex_cytocyto_df$log2FoldChange) * -log10(sex_cytocyto_df$padj)
-
-sex_top_cytocyto <- sex_cytocyto_df[
-  order(sex_cytocyto_df$score, decreasing = TRUE),]
-
-sex_cytocyto_gene_symbols <- mapIds(
-  org.Hs.eg.db,
-  keys = rownames(sex_top_cytocyto)[1:10],
-  column = "SYMBOL",
-  keytype = "ENTREZID",
-  multiVals = "first")
-
-sex_cytocyto_gene_symbols
-
-#       8784       7293       8764       3604        943       7133      58985     163702       1441 
-# "TNFRSF18"  "TNFRSF4" "TNFRSF14"  "TNFRSF9"  "TNFRSF8" "TNFRSF1B"  "IL22RA1"   "IFNLR1"    "CSF3R" 
-#  353500 
-# "BMP8A" 
-
-# comparison of important genes that appear in the most enriched pathways in 
-# KEGG enrichment of sex.
-
-all_genes_sex <- unlist(strsplit(gse_sex@result$core_enrichment, "/"))
-
-all_sexgene_symbols <- mapIds(
-  org.Hs.eg.db,
-  keys = all_genes_sex,
-  column = "SYMBOL",
-  keytype = "ENTREZID",
-  multiVals = "first")
-
-table(all_sexgene_symbols) |> sort(decreasing = TRUE)
-
-# TNF          IL1B           IL6        MAPK12        PIK3CD         IKBKG        PIK3R2 
-#  29            27            25            24            24            22            22 
-# MAPK11          HRAS           JUN        MAPK13         PRKCB           BAX         CXCL8 
-#     21            20            20            18            18            17            17 
-# LOC102723407        MAP2K2         TRAF2        CALML3        CALML5        CALML6 
-#           17            17            17            15            15            15 
-
-
-
+dotplot(gse_ARTH_Mint, showCategory = 10) +
+  ggtitle("KEGG enriched Sex interaction in ARTH Pathways")
