@@ -1,0 +1,3622 @@
+### DGEA OF GSE 89408###
+# 01-Loading-Data ---------------------------------------------------------
+
+
+setwd("C:/R_Projects/GSE89408")
+
+# follow this strategy https://pmc.ncbi.nlm.nih.gov/articles/PMC4670015/
+
+list.files()
+
+# in case libraries are not downloaded
+if (!requireNamespace("BiocManager", quietly = TRUE))
+  install.packages("BiocManager")
+
+cran_packages <- c(
+  "pheatmap",
+  "RColorBrewer", 
+  "ggplot2", 
+  "ggpubr")
+
+for (pkg in cran_packages) {
+  if (!requireNamespace(pkg, quietly = TRUE))
+    install.packages(pkg)
+  library(pkg, character.only = TRUE)}
+
+bioc_packages <- c(
+  "GEOquery",
+  "DESeq2",
+  "clusterProfiler",
+  "EnhancedVolcano",
+  "org.Hs.eg.db", 
+  "apeglm")
+
+for (pkg in bioc_packages) {
+  if (!requireNamespace(pkg, quietly = TRUE))
+    install.packages(pkg)
+  library(pkg, character.only = TRUE)}
+
+library(pheatmap)
+library(RColorBrewer)
+library(ggplot2)
+library(ggpubr)
+library(GEOquery)
+library(DESeq2)
+library(clusterProfiler)
+library(EnhancedVolcano)
+library(org.Hs.eg.db)
+library(apeglm)
+library(tidyr)
+library(dplyr)
+
+# loading data collected so far to skip coding
+load("C:/R_Projects/GSE89408/Data/GSEA-89408.RData")
+
+# seeding to ensure reproducibility for all activities involving randomness 
+# moving forward.
+set.seed(89408)
+
+# Now good to continue
+# starting with downloading GSE89408
+
+gse <- getGEO("GSE89408", GSEMatrix = TRUE)
+gse <- gse[[1]]
+
+# extracting phenotype data
+pheno <- pData(gse)
+dim(pheno)
+# [1] 218  46a
+
+#checking to see if data is normalized
+
+# Verifying that the data represents raw counts rather than normalized data.
+# Raw RNA-seq counts should be integer values.
+all(pheno %% 1 == 0)
+# [Error in FUN(left, right) : non-numeric argument to binary operator
+# -> this indicates that counts are not integer values, 
+
+# Additionally, the count range includes large values typical of raw read counts
+range(pheno)
+# Error in FUN(X[[i]], ...) : 
+# only defined on a data frame with all numeric-alike variables
+# -> this further indicates that using the data provided by getGEO() is
+# normalized and not raw.
+
+
+# Loading a raw count matrix downloaded from GEO supplementary files
+# File: GSE89408_raw_counts_GRCh38.p13_NCBI.tsv
+# Source: NCBI GEO (Series GSE89408) supplementary data
+# Description:
+#   - Rows = genes (Entrez Gene IDs)
+#   - Columns = RNA-seq samples
+#   - Values = raw read counts mapped to genes
+#   - Reference genome: GRCh38.p13
+
+# Expression data retrieved from getGEO() was already normalized, which
+# would mean it is not raw counts which are required for Deseq2 analysis.
+# This file contains the original raw RNA-seq read counts which are required
+# for the DGEA that I plan on doing.
+
+counts <- read.table("GSE89408_raw_counts_GRCh38.p13_NCBI.tsv",
+                     header = TRUE,
+                     sep = "\t",
+                     row.names = 1,
+                     check.names = FALSE)
+
+# checking counts data
+head(counts[,1])
+# [1]   61 1699  119    3    0    3
+
+# Verifying that the data represents raw counts rather than normalized data.
+# Raw RNA-seq counts should be integer values.
+all(counts %% 1 == 0)
+# [1] TRUE -> this indicates that counts are integer values, 
+
+# Additionally, the count range includes large values typical of raw read counts
+range(counts)
+# [1]   0   19317662
+
+# Since all values are integers and span a wide range of sequencing depths,
+# this confirms that the file contains raw read counts suitable for DESeq2.
+
+# Because of how DESeq2 works, the raw counts will be normalized internally 
+# using size factor estimation and variance stabilizing transformation (VST)
+# This avouds using externally normalized data which ensures that dispersion
+# estimates and differential expression statistics are calculated correctly
+# according to the DESeq2 workflow.
+
+
+# checking to see if data is aligned
+
+# pheno and counts differ in length, meaning one is either missing, or has too
+# many, so using intersect I grab only common samples between the two.
+
+# Find common samples
+common_samples <- intersect(rownames(pheno), colnames(counts))
+length(common_samples)
+
+# Subset and reorder
+pheno <- pheno[common_samples, , drop=FALSE]
+counts <- counts[, common_samples, drop=FALSE]
+
+all(rownames(pheno) == colnames(counts))
+# [1] TRUE
+
+#
+#
+#
+# data is properly aligned, now I can do a pre-analysis.
+# By ensuring that sample identifiers match between phenotype metadata
+# and the RNA-seq count matrix I am able to match metadata characteristics
+# like sex and disease type to the RNA-seq raw counts. This allows for 
+# pathway comparisons between such characteristics. Intersect() is used
+# to identify samples that appear in  both data sets so that phenotype
+# metadata and count data remain correctly aligned. 
+#
+#
+#
+# Sex will not be used to subset the data set into separate analyses, instead
+# it will be included as a co-variate in the DESeq2 design formula so that 
+# differential expression results account for the transcriptional differences 
+# between males and females.
+#
+#
+#
+
+
+# 02-Exploratory-Analysis -------------------------------------------------
+
+
+# checking depth variation in data
+dim(counts)
+# [1] 39376   207
+summary(colSums(counts))
+#     Min.  1st Qu.   Median     Mean  3rd Qu.     Max. 
+# 9844995 40420506 43459380 44188446 47431896 61718414
+
+# visualizing sequencing depth
+
+library_df <- data.frame(LibrarySize = colSums(counts))
+
+ggplot(library_df, aes(x = LibrarySize)) +
+  geom_histogram(bins = 30, fill = "steelblue", color = "black") +
+  theme_bw() +
+  labs(
+    title = "Distribution of Sequencing Library Sizes",
+    x = "Total Reads per Sample",
+    y = "Frequency")
+
+# slightly left skewed bell curve
+
+# visualizing single sample raw counts
+
+sample_df <- data.frame(counts = log10(counts[,1] + 1))
+
+ggplot(sample_df, aes(x = counts)) +
+  geom_histogram(bins = 50, fill = "darkorange", color = "black") +
+  theme_bw() +
+  labs(
+    title = "Distribution of Raw Gene Counts (Sample 1)",
+    x = "Log10 Gene Counts",
+    y = "Frequency")
+
+# extreme right skew, with a spike near zero.
+
+# box plot of raw counts with log10 for easier visualization.
+boxplot(log10(counts + 1),
+        outline = FALSE,
+        las = 1,
+        par(mar = c(4.5, 4.1, 4.1, 4.5)), 
+        main = "Log10 Raw Counts per Sample", 
+        ylab = "Raw Counts amount", 
+        xlab = "Sample name")
+
+# High variance among sanples, with mean shifting per sample as well.
+
+# Visualization of the Mean-Variance relationship to see
+# if using a negative binomial model like Deseq2 will work.
+
+gene_means <- rowMeans(counts)
+gene_vars <- apply(counts, 1, var)
+
+df_mv <- data.frame(mean = gene_means, variance = gene_vars)
+
+ggplot(df_mv, aes(mean, variance)) +
+  geom_point(alpha = 0.3, size = 1) +
+  scale_x_log10() +
+  scale_y_log10() +
+  theme_bw() +
+  labs(
+    title = "Mean–Variance Relationship of Gene Counts",
+    x = "Mean Expression (log10)",
+    y = "Variance (log10)")
+
+# positive increase between mean and variance shows that 
+# Deseq2 will be viable. 
+
+# Creating a snapshot of pre-analysis-data 
+table(pheno$disease)
+# Arthralgia                         Normal                   Osteoarthritis 
+#         10                             23                               18 
+# Rheumatoid arthritis (early)    Rheumatoid arthritis (established)  Undifferentiated arthritis 
+#                          57                                     93                          6 
+
+table(pheno$Sex)
+#   F   M 
+# 140  67 
+
+# checking age as well
+sum(pheno$age == "NA")
+# [1] 25
+length(pheno$age)
+# [1] 207
+mean(pheno$age == "NA")
+# [1] 0.1207729
+
+# age may be accounted for with stipulations, checking to see if 
+# age varies in the disease group, had to clean the age group as numeric 
+# before plotting as it appeared as character data.
+
+ggplot(pheno, aes(x = `disease:ch1`, y = `age:ch1`, fill = `disease:ch1`)) +
+  geom_boxplot() +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  labs(
+    title = "Age Distribution Across Disease Groups",
+    x = "Disease Group",
+    y = "Age"
+  ) +
+  guides(fill = "none")
+
+# boxplot shows that normal group is on average younger at ~30 years, 
+# the disease groups cluster around the higher age of 50-60 years, this 
+# means that age can at least be associated with disease.
+
+
+# 03-Differential-Expression-Analysis -------------------------------------
+
+#
+#
+#
+# Starting DESeq2 analysis.
+#
+#
+#
+
+
+# The analyses I plan to perform are:
+
+# 1: Sex differences between male and female samples
+# 2: Diseased tissue comparisons vs Normal control tissues.
+#   - RA (early) vs Normal
+#   - RA (established) vs Normal
+#   - Arthalgia vs Normal
+#   - OA vs Normal
+
+# These contrasts are planned to identify transcriptional signatures associated
+# with different stages of inflammatory arthritis, while controlling for sex 
+# differences in gene expression.
+
+
+# begining DESeq2 analysis by loading data, age must be numeric, 
+# sex and disease must be factors. All NA's must be removed from 
+# age data as well.
+
+# Identifying all samples with complete design info
+keep <- complete.cases(pheno[, c("Sex:ch1", "age:ch1", "disease:ch1")])
+
+# Sub-setting phenotype with complete info
+pheno_clean <- pheno[keep, ]
+
+# Sub-setting counts to match complete samples in pheno
+counts_clean <- counts[, rownames(pheno_clean)]
+
+# now verifying alignments
+all(rownames(pheno_clean) == colnames(counts_clean))
+# [1] TRUE
+
+# Now making sure that alignments are actually there
+
+# First I find common samples in my clean subsets.
+common <- intersect(colnames(counts_clean), rownames(pheno_clean))
+
+# then I re-order subsets to common samples
+counts_clean2 <- counts[, common]
+pheno_clean2 <- pheno_clean[common, ]
+
+# Forcing exact order match
+pheno_clean2 <- pheno_clean2[colnames(counts_clean2), ]
+
+# checking final allignment
+all(colnames(counts_clean2) == rownames(pheno_clean2))
+# [1] TRUE
+
+# making sure all characteristic data other than age is 
+# factor.
+pheno_clean2$Sex <- factor(pheno_clean2$Sex)
+pheno_clean2$disease <- factor(pheno_clean2$disease)
+
+# cleaning up level factors to make column names more clean.
+pheno_clean2$disease <- factor(pheno_clean2$disease,
+                               levels = c("Normal", "Arthralgia", "Osteoarthritis",
+                                          "Rheumatoid arthritis (established)",
+                                          "Rheumatoid arthritis (early)"),
+                               labels = c("Normal", "Arthralgia", "OA", "RA_est", "RA_early"))
+
+# visualizing clean data
+table(pheno_clean2$Sex, pheno_clean2$disease)
+
+#   Normal Arthralgia OA RA_est RA_early
+# F     11          7  7     63       33
+# M     12          1  5     19       24
+
+# before doing DEseq2 checking for confounding effects in age, to determine
+# if its worth investigating. Making sure age is scaled to avoid collinearity.
+keep <- !is.na(pheno_clean2$age)
+pheno_clean2 <- pheno_clean2[keep, ]
+counts_clean2 <- counts_clean2[, rownames(pheno_clean2)]
+
+pheno_clean2$age <- as.numeric(gsub("[^0-9.]", "", pheno_clean2$age))
+
+pheno_clean2$age_scaled <- scale(pheno_clean2$age)
+
+table(pheno_clean2$Sex, pheno_clean2$age_scaled > median(pheno_clean2$age_scaled))
+#   FALSE TRUE
+# F    60   61
+# M    33   28
+# Age data seems pretty balanced. 
+
+# first doing DEseq2 of all applicable factors
+
+
+dds <- DESeqDataSetFromMatrix(
+  countData = counts_clean2,
+  colData = pheno_clean2,
+  design = ~ age_scaled + disease * Sex)
+
+dds
+# class: DESeqDataSet 
+# dim: 39376 182 
+# metadata(1): version
+# assays(1): counts
+# rownames(39376): 100287102 653635 ... 4576 4571
+# rowData names(0):
+# colnames(182): GSM2370970 GSM2370971 ... GSM2371183 GSM2371185
+# colData names(50): title geo_accession ... disease age_scaled
+
+# checking data before normalization
+boxplot(assay(dds),
+        outline = FALSE,
+        las = 1,
+        main = "dds raw counts per sample", 
+        ylab = "Raw RNA-seq counts", 
+        xlab = "Sample ID")
+
+# high dispersion, with somewhat normalized means.
+
+# applying DESeq2 analysis
+dds <- DESeq(dds)
+
+# Seeing if dispersion fits visually 
+plotDispEsts((dds), 
+             main = "Dispersion Estimate for dds")
+# fitted line decently fits final dispersion, meaning a negative binomial 
+# (Deseq2) dispersion modeling.
+
+# Looking at dds results
+resultsNames(dds)
+
+
+vsd <- vst(dds, blind = FALSE)
+
+# checking if data is viable after normalization
+boxplot(assay(vsd),
+        outline = FALSE,
+        las = 2,
+        main = "VST-normalized dds counts")
+# Data looks very viable. Much lower dispersion with similar medians.
+
+# checking for outliers with boxplot before using PCA
+
+boxplot(colMeans(assay(vsd)))
+
+# some potential outliers present, 17 pass the IQR, with 3 really standing out. 
+# Checking PCA for further confirmation. Starting with a PCA coloured by age
+# to see any pattern in variance caused by age.
+
+sdpca <- plotPCA(vsd, intgroup=c("Sex","disease"), returnData=TRUE)
+
+percentVar <- round(100 * attr(sdpca, "percentVar"))
+
+ggplot(sdpca, aes(PC1, PC2, color=pheno_clean2$age)) +
+  geom_point(size=3) +
+  scale_color_gradient(low="black", high="yellow") +
+  theme_bw() +
+  labs(
+    title="PCA Colored by Age",
+    x=paste0("PC1: ", percentVar[1], "% variance"),
+    y=paste0("PC2: ", percentVar[2], "% variance"), 
+    color="Age")
+
+# PC1 makes up 58% of the variance, while PC2 only makes up 8%,
+# because point scattering seems to be random aside from most of the 
+# youngest groups being in the -50 PC1 range.This suggests that 
+# age groups do not perfectly correlate with PC1 or PC2. This implies
+# that the age group only partially explains the variation, and that 
+# other transcriptomics play a role. 
+
+# Now plotting PCA where sex and disease are incorporated.
+
+ggplot(sdpca, aes(PC1, PC2, color=Sex, shape=disease)) +
+  geom_point(size=3) +
+  theme_bw() +
+  labs(
+    title="Principal Component Analysis of RNA-seq Samples",
+    x=paste0("PC1: ", percentVar[1], "% variance"),
+    y=paste0("PC2: ", percentVar[2], "% variance"))
+
+# There is a clear separation between male and female along PC1, 
+# where PC1 doesn't quite show a separation. PC1 shows that 
+# sex is the dominant factor for variance. This means that 
+# sex differences attribute a large variation to the gene 
+# expression of the samples in this data set.
+# PC2 variance may be due to the disease groups, as slight vertical 
+# seperation can be seen amongst disease groups, primarily 
+# the normal and RA groups, with arthralgia and osteoarthritis being 
+# intermediates between them. This small seperation may explain why 
+# PC2's variance (8%) is much smaller than PC1's (58%).
+
+# Now that variance among groups is decided, isolation of the variance
+# through visualization techniques like heat maps or distance matrices.
+
+# data is already variance stabilized, so I can go straight to
+# checking sample to sample distances.
+
+# First is to compute sample distances
+sampleDists <- dist(t(assay(vsd)))
+
+# Then to convert them to a matrix for plotting
+sampleDistMatrix <- as.matrix(sampleDists)
+rownames(sampleDistMatrix) <- colnames(vsd)
+colnames(sampleDistMatrix) <- colnames(vsd)
+
+# Creating a color palette
+colors <- colorRampPalette(rev(brewer.pal(9, "Blues")))(255)
+
+# Then plotting a heat map of these distances
+annotation <- as.data.frame(colData(vsd)[,c("Sex","disease","age")])
+
+pheatmap(
+  sampleDistMatrix,
+  clustering_distance_rows = sampleDists,
+  clustering_distance_cols = sampleDists,
+  annotation_col = annotation,
+  col = colorRampPalette(rev(brewer.pal(9,"Blues")))(255),
+  main="Sample-to-Sample Distance Heatmap")
+
+# heat map shows high data consistency, as each sample has close 
+# to 0 distance from itself. There is a baseline similarity across most 
+# samples (as in a small distance), with some certain samples showing 
+# higher distances. However, the difference between each sample if high 
+# enough to suggest that all samples are distinct from each other. The 
+# bottom right corner of the map seems to have an outline cluster, where
+# a small period of high distance turns into small distance, which implies 
+# that this cluster is much more similar to itself than to all the other 
+# samples. Certain bands distributed throughout the 
+# heat map suggests that certain samples in each group have significantly 
+# different from their average gene expression profile, in most RA 
+# studies this signifies either batch effects, or a strong biological 
+# variable. It would appear based on the dendrogram that groups do not 
+# display a strong biological signal. sample to sample distance maps
+# do not provide full clarity on expression, so higher clarity heat 
+# maps can provide better answers.
+
+# For instance, I can use a most variable genes heat map. (top 50).
+
+# Computing row variances
+geneVars <- apply(assay(vsd), 1, var)
+
+# Selecting top 50 most variable genes
+topGenes <- names(sort(geneVars, decreasing = TRUE))[1:50]
+
+# [1] "3514"      "3500"      "7503"      "3538"      "3502"      "3539"      "3503"      "3505"     
+# [9] "28912"     "3507"      "9383"      "3501"      "28908"     "28914"     "28299"     "3537"     
+# [17] "8284"      "28930"     "28442"     "100423062" "28893"     "28913"     "28933"     "28947"    
+# [25] "3493"      "3512"      "3043"      "8287"      "7404"      "28813"     "28439"     "28434"    
+# [33] "28444"     "28950"     "28815"     "28797"     "28832"     "4312"      "28949"     "28896"    
+# [41] "28796"     "6192"      "28809"     "8653"      "28392"     "28474"     "28468"     "28394"    
+# [49] "28450"     "4314" 
+
+# Subsetting the VST matrix
+topVarMat <- assay(vsd)[topGenes, ]
+
+# now making a heat map of the top variable genes
+
+# Adding sample annotations for clarity
+annotation <- as.data.frame(colData(vsd)[, c("Sex", "disease")])
+
+# Plotting heatmap of top 50 gene symbols by converting IDs.
+
+top50sample_gene_symbols <- mapIds(
+  org.Hs.eg.db,
+  keys = topGenes,
+  column = "SYMBOL",
+  keytype = "ENTREZID",
+  multiVals = "first")
+
+# Replacing rownames with gene symbols
+rownames(topVarMat) <- top50sample_gene_symbols
+
+# Removing genes that failed to map (NA symbols)
+topVarMat <- topVarMat[!is.na(rownames(topVarMat)), ]
+
+# Plot heatmap with symbols
+pheatmap(topVarMat,
+         cluster_rows = TRUE,
+         cluster_cols = TRUE,
+         show_rownames = TRUE,
+         annotation_col = annotation,
+         scale = "row",
+         color = colorRampPalette(rev(brewer.pal(9, "RdBu")))(255),
+         main = "Top 50 Variable Genes Across Samples")
+
+# This filters out genes that are mostly similar across all groups, 
+# which can provide clarity. Genes 7404-6192 are very up-regulated
+# in males and somewhat down-regulated in females, while the opposite
+# seems to be true for genes 7503-9383. This suggests that some
+# of the genes are present only on the X or Y chromosome. These two
+# sections of genes seem to belong each to their own gene cluster, 
+# with other gene clusters being 3043, 4312-4314, and a massive one
+# that is 28796-3512, meaning of the 50 most variable genes, there 
+# are 5 functional gene groups present. 
+
+# genes 7404 (UTY), 8287 (USP9Y), 8653 (DDX3Y), 8284 (KDM5D), and 
+# 6192 (RPS4Y1), are all Y-linked genes, which makes sense why they
+# are up-regulated in males. While 7503 (XIST) and 9383 (TSIX) are both
+# X-linked genes which makes sense as to why they are up-regulated in 
+# females. Gene 3043 (HBB) is a beta-globin gene. 4312 (MMP1) and 
+# 4314 (MMP3) are involved in enzymes that break down extracellular 
+# proteins. Gene 28796 (IGLV3-21) which is involved in antigen binding 
+# for immune cells, all genes between 28796 to 3512 are involved in the 
+# immune system in some way. 
+
+
+# checking for batch effects.
+colnames(pheno_clean2)
+# possible batch effects are "submission_date", "instrument_model", and 
+# "platform_id". Now checking to see if candidate batch effects may provide 
+# variability.
+
+table(pheno_clean2$instrument_model)
+# Illumina HiSeq 2000 
+#                 182 
+
+table(pheno_clean2$platform_id)
+# GPL11154 
+#      182
+
+table(pheno_clean2$submission_date)
+# Nov 01 2016 
+#         182
+
+# No variability found in common batch candidates.Thus concluding exploratory
+# analysis on march 8th, 2026.
+
+#
+#
+#
+#
+#
+### Differential Gene Expression Analysis ###
+#
+#
+#
+#
+#
+
+# Now that some gene groupings are identified and batch effects are checked
+# I can do Differential Expression analysis.
+
+# first checking tables to see if dataset has correct order
+table(dds$Sex, dds$disease)
+#   Normal Arthralgia OA RA_est RA_early
+# F     11          7  7     63       33
+# M     12          1  5     19       24
+
+# table looks correct
+
+# Getting results for disease effect
+
+# First getting result names so I know what to contrast
+
+resultsNames(dds)
+# [1] "Intercept"                    "age_scaled"                   "disease_Arthralgia_vs_Normal"
+# [4] "disease_OA_vs_Normal"         "disease_RA_est_vs_Normal"     "disease_RA_early_vs_Normal"  
+# [7] "Sex_M_vs_F"                   "diseaseArthralgia.SexM"       "diseaseOA.SexM"              
+# [10] "diseaseRA_est.SexM"           "diseaseRA_early.SexM" 
+
+# RAest-DGEA --------------------------------------------------------------
+
+
+# Now contrasting with RAest vs normal in females
+
+res_RAest_F <- results(dds, name = "disease_RA_est_vs_Normal")
+
+# then checking RAest vs normal in males for interactions
+
+res_RAest_Mint <- results(dds, name = "diseaseRA_est.SexM")
+
+res_RAest_M <- results(dds,
+                       contrast = list(c("disease_RA_est_vs_Normal",
+                                         "diseaseRA_est.SexM")))
+
+# Now filtering results
+
+sig_RAest_F <- res_RAest_F[
+  !is.na(res_RAest_F$padj) &
+    res_RAest_F$padj < 0.05 &
+    abs(res_RAest_F$log2FoldChange) > 0.5,]
+
+sig_RAest_M <- res_RAest_M[
+  !is.na(res_RAest_M$padj) &
+    res_RAest_M$padj < 0.05 &
+    abs(res_RAest_M$log2FoldChange) > 0.5,]
+
+sig_RAest_Mint <- res_RAest_Mint[
+  !is.na(res_RAest_Mint$padj) &
+    res_RAest_Mint$padj < 0.05 &
+    abs(res_RAest_Mint$log2FoldChange) > 0.5,]
+
+# Overlap analysis of RAest genes
+
+RAest_common_genes <- intersect(rownames(sig_RAest_F), rownames(sig_RAest_M))
+RAest_female_only <- setdiff(rownames(sig_RAest_F), rownames(sig_RAest_M))
+RAest_male_only <- setdiff(rownames(sig_RAest_M), rownames(sig_RAest_F))
+
+# now compiling results for GSEA later.
+
+genelist_RAest_F <- res_RAest_F$log2FoldChange
+names(genelist_RAest_F) <- rownames(res_RAest_F)
+genelist_RAest_F <- sort(genelist_RAest_F, decreasing = TRUE)
+
+genelist_RAest_M <- res_RAest_M$log2FoldChange
+names(genelist_RAest_M) <- rownames(res_RAest_M)
+genelist_RAest_M <- sort(genelist_RAest_M, decreasing = TRUE)
+
+genelist_RAest_Mint <- res_RAest_Mint$log2FoldChange
+names(genelist_RAest_Mint) <- rownames(res_RAest_Mint)
+genelist_RAest_Mint <- sort(genelist_RAest_Mint, decreasing = TRUE)
+
+# applying gene symbol labels to make plots clearer
+
+# Female
+RAest_F_gene_symbols <- mapIds(
+  org.Hs.eg.db,
+  keys = rownames(res_RAest_F),
+  column = "SYMBOL",
+  keytype = "ENTREZID",
+  multiVals = "first")
+
+res_RAest_F$symbol <- RAest_F_gene_symbols
+
+RAest_F_gene_symbols[is.na(RAest_F_gene_symbols)] <- rownames(res_RAest_F)[is.na(RAest_F_gene_symbols)]
+
+res_RAest_F$symbol <- RAest_F_gene_symbols
+
+# Male
+RAest_M_gene_symbols <- mapIds(
+  org.Hs.eg.db,
+  keys = rownames(res_RAest_M),
+  column = "SYMBOL",
+  keytype = "ENTREZID",
+  multiVals = "first")
+
+res_RAest_M$symbol <- RAest_M_gene_symbols
+
+RAest_M_gene_symbols[is.na(RAest_M_gene_symbols)] <- rownames(res_RAest_M)[is.na(RAest_M_gene_symbols)]
+
+res_RAest_M$symbol <- RAest_M_gene_symbols
+
+# Sex-interactions
+RAest_Mint_gene_symbols <- mapIds(
+  org.Hs.eg.db,
+  keys = rownames(res_RAest_Mint),
+  column = "SYMBOL",
+  keytype = "ENTREZID",
+  multiVals = "first")
+
+res_RAest_Mint$symbol <- RAest_Mint_gene_symbols
+
+RAest_Mint_gene_symbols[is.na(RAest_Mint_gene_symbols)] <- rownames(res_RAest_Mint)[is.na(RAest_Mint_gene_symbols)]
+
+res_RAest_Mint$symbol <- RAest_Mint_gene_symbols
+
+# then plotting established RA contrasts
+
+# starting with plotting female contrasts
+
+volFRAestVNorm_cap <- paste(
+  "Figure 10. Volcano plot of differential gene expression in female established rheumatoid arthritis (RA) versus normal synovial tissue.",
+  "Log2 fold change is plotted against –log10 adjusted p-values.",
+  "Significance thresholds: adjusted p-value < 0.05 and |log2 fold change| > 1 (DESeq2).")
+
+volFRAestVNorm_wrap <- paste(strwrap(volFRAestVNorm_cap, width = 100), collapse = "\n")
+
+EnhancedVolcano(
+  res_RAest_F,
+  lab = res_RAest_F$symbol, 
+  x = 'log2FoldChange',
+  y = 'padj', 
+  pCutoff = 0.05,
+  FCcutoff = 1) + labs(caption = volFRAestVNorm_wrap) + theme(
+           plot.caption = element_text(hjust = 0, size = 12))
+
+# then plotting male contrasts
+
+volMRAestVNorm_cap <- paste(
+  "Figure 11. Volcano plot of differential gene expression in male established rheumatoid arthritis (RA) versus normal synovial tissue.",
+  "Log2 fold change is plotted against –log10 adjusted p-values.",
+  "Significance thresholds: adjusted p-value < 0.05 and |log2 fold change| > 1 (DESeq2).")
+
+volMRAestVNorm_wrap <- paste(strwrap(volMRAestVNorm_cap, width = 100), collapse = "\n")
+
+EnhancedVolcano(
+  res_RAest_M,
+  lab = res_RAest_M$symbol, 
+  x = 'log2FoldChange',
+  y = 'padj', 
+  pCutoff = 0.05,
+  FCcutoff = 1) + labs(caption = volMRAestVNorm_wrap) + theme(
+    plot.caption = element_text(hjust = 0, size = 12))
+
+# Then plotting sex interactions
+volMintRAestVNorm_cap <- paste(
+  "Figure 12. Volcano plot of differential gene expression of Sex-Interactions in established rheumatoid arthritis (RA) versus normal synovial tissue.",
+  "Log2 fold change is plotted against –log10 adjusted p-values.",
+  "Significance thresholds: adjusted p-value < 0.05 and |log2 fold change| > 1 (DESeq2).")
+
+volMintRAestVNorm_wrap <- paste(strwrap(volMintRAestVNorm_cap, width = 100), collapse = "\n")
+
+EnhancedVolcano(
+  res_RAest_Mint,
+  lab = res_RAest_Mint$symbol, 
+  x = 'log2FoldChange',
+  y = 'padj', 
+  pCutoff = 0.05,
+  FCcutoff = 1) + labs(caption = volMintRAestVNorm_wrap) + theme(
+    plot.caption = element_text(hjust = 0, size = 12))
+
+# RAear-DGEA --------------------------------------------------------------
+
+
+# Now contrasting with RAear vs normal in females
+
+res_RAear_F <- results(dds, name = "disease_RA_early_vs_Normal")
+
+# then checking RAear vs normal in males for interactions
+
+res_RAear_Mint <- results(dds, name = "diseaseRA_early.SexM")
+
+res_RAear_M <- results(dds,
+                       contrast = list(c("disease_RA_early_vs_Normal",
+                                         "diseaseRA_early.SexM")))
+
+# Now filtering results
+
+sig_RAear_F <- res_RAear_F[
+  !is.na(res_RAear_F$padj) &
+    res_RAear_F$padj < 0.05 &
+    abs(res_RAear_F$log2FoldChange) > 0.5,]
+
+sig_RAear_M <- res_RAear_M[
+  !is.na(res_RAear_M$padj) &
+    res_RAear_M$padj < 0.05 &
+    abs(res_RAear_M$log2FoldChange) > 0.5,]
+
+sig_RAear_Mint <- res_RAear_Mint[
+  !is.na(res_RAear_Mint$padj) &
+    res_RAear_Mint$padj < 0.05 &
+    abs(res_RAear_Mint$log2FoldChange) > 0.5,]
+
+# Overlap analysis of RAear genes
+
+RAear_common_genes <- intersect(rownames(sig_RAear_F), rownames(sig_RAear_M))
+RAear_female_only <- setdiff(rownames(sig_RAear_F), rownames(sig_RAear_M))
+RAear_male_only <- setdiff(rownames(sig_RAear_M), rownames(sig_RAear_F))
+
+# now compiling results 
+
+genelist_RAear_F <- res_RAear_F$log2FoldChange
+names(genelist_RAear_F) <- rownames(res_RAear_F)
+genelist_RAear_F <- sort(genelist_RAear_F, decreasing = TRUE)
+
+genelist_RAear_M <- res_RAear_M$log2FoldChange
+names(genelist_RAear_M) <- rownames(res_RAear_M)
+genelist_RAear_M <- sort(genelist_RAear_M, decreasing = TRUE)
+
+genelist_RAear_Mint <- res_RAear_Mint$log2FoldChange
+names(genelist_RAear_Mint) <- rownames(res_RAear_Mint)
+genelist_RAear_Mint <- sort(genelist_RAear_Mint, decreasing = TRUE)
+
+# applying gene symbol labels to make plots clearer
+
+# Female
+RAear_F_gene_symbols <- mapIds(
+  org.Hs.eg.db,
+  keys = rownames(res_RAear_F),
+  column = "SYMBOL",
+  keytype = "ENTREZID",
+  multiVals = "first")
+
+res_RAear_F$symbol <- RAear_F_gene_symbols
+
+RAear_F_gene_symbols[is.na(RAear_F_gene_symbols)] <- rownames(res_RAear_F)[is.na(RAear_F_gene_symbols)]
+
+res_RAear_F$symbol <- RAear_F_gene_symbols
+
+# Male
+RAear_M_gene_symbols <- mapIds(
+  org.Hs.eg.db,
+  keys = rownames(res_RAear_M),
+  column = "SYMBOL",
+  keytype = "ENTREZID",
+  multiVals = "first")
+
+res_RAear_M$symbol <- RAear_M_gene_symbols
+
+RAear_M_gene_symbols[is.na(RAear_M_gene_symbols)] <- rownames(res_RAear_M)[is.na(RAear_M_gene_symbols)]
+
+res_RAear_M$symbol <- RAear_M_gene_symbols
+
+# Sex-interactions
+RAear_Mint_gene_symbols <- mapIds(
+  org.Hs.eg.db,
+  keys = rownames(res_RAear_Mint),
+  column = "SYMBOL",
+  keytype = "ENTREZID",
+  multiVals = "first")
+
+res_RAear_Mint$symbol <- RAear_Mint_gene_symbols
+
+RAear_Mint_gene_symbols[is.na(RAear_Mint_gene_symbols)] <- rownames(res_RAear_Mint)[is.na(RAear_Mint_gene_symbols)]
+
+res_RAear_Mint$symbol <- RAear_Mint_gene_symbols
+
+# then plotting established RA contrasts
+
+# starting with plotting female contrasts
+
+volFRAearVNorm_cap <- paste(
+  "Figure 15. Volcano plot of differential gene expression in female early rheumatoid arthritis (RA) versus normal synovial tissue.",
+  "Log2 fold change is plotted against –log10 adjusted p-values.",
+  "Significance thresholds: adjusted p-value < 0.05 and |log2 fold change| > 1 (DESeq2).")
+
+volFRAearVNorm_wrap <- paste(strwrap(volFRAearVNorm_cap, width = 100), collapse = "\n")
+
+EnhancedVolcano(
+  res_RAear_F,
+  lab = res_RAear_F$symbol, 
+  x = 'log2FoldChange',
+  y = 'padj', 
+  pCutoff = 0.05,
+  FCcutoff = 1) + labs(caption = volFRAearVNorm_wrap) + theme(
+    plot.caption = element_text(hjust = 0, size = 12))
+
+# then plotting male contrasts
+
+volMRAearVNorm_cap <- paste(
+  "Figure 16. Volcano plot of differential gene expression in male early rheumatoid arthritis (RA) versus normal synovial tissue.",
+  "Log2 fold change is plotted against –log10 adjusted p-values.",
+  "Significance thresholds: adjusted p-value < 0.05 and |log2 fold change| > 1 (DESeq2).")
+
+volMRAearVNorm_wrap <- paste(strwrap(volMRAearVNorm_cap, width = 100), collapse = "\n")
+
+EnhancedVolcano(
+  res_RAear_M,
+  lab = res_RAear_M$symbol, 
+  x = 'log2FoldChange',
+  y = 'padj', 
+  pCutoff = 0.05,
+  FCcutoff = 1) + labs(caption = volMRAearVNorm_wrap) + theme(
+    plot.caption = element_text(hjust = 0, size = 12))
+
+# Then plotting sex interactions
+volMintRAearVNorm_cap <- paste(
+  "Figure 17. Volcano plot of differential gene expression of Sex-Interactions in early rheumatoid arthritis (RA) versus normal synovial tissue.",
+  "Log2 fold change is plotted against –log10 adjusted p-values.",
+  "Significance thresholds: adjusted p-value < 0.05 and |log2 fold change| > 1 (DESeq2).")
+
+volMintRAearVNorm_wrap <- paste(strwrap(volMintRAearVNorm_cap, width = 100), collapse = "\n")
+
+EnhancedVolcano(
+  res_RAear_Mint,
+  lab = res_RAear_Mint$symbol, 
+  x = 'log2FoldChange',
+  y = 'padj', 
+  pCutoff = 0.05,
+  FCcutoff = 1) + labs(caption = volMintRAearVNorm_wrap) + theme(
+    plot.caption = element_text(hjust = 0, size = 12))
+
+# OA-DGEA -----------------------------------------------------------------
+
+# Now contrasting with OA vs normal in females
+
+res_OA_F <- results(dds, name = "disease_OA_vs_Normal")
+
+# then checking OA vs normal in males for interactions
+
+res_OA_Mint <- results(dds, name = "diseaseOA.SexM")
+
+res_OA_M <- results(dds,
+                       contrast = list(c("disease_OA_vs_Normal",
+                                         "diseaseOA.SexM")))
+
+# Now filtering results
+
+sig_OA_F <- res_OA_F[
+  !is.na(res_OA_F$padj) &
+    res_OA_F$padj < 0.05 &
+    abs(res_OA_F$log2FoldChange) > 0.5,]
+
+sig_OA_M <- res_OA_M[
+  !is.na(res_OA_M$padj) &
+    res_OA_M$padj < 0.05 &
+    abs(res_OA_M$log2FoldChange) > 0.5,]
+
+sig_OA_Mint <- res_OA_Mint[
+  !is.na(res_OA_Mint$padj) &
+    res_OA_Mint$padj < 0.05 &
+    abs(res_OA_Mint$log2FoldChange) > 0.5,]
+
+# Overlap analysis of OA genes
+
+OA_common_genes <- intersect(rownames(sig_OA_F), rownames(sig_OA_M))
+OA_female_only <- setdiff(rownames(sig_OA_F), rownames(sig_OA_M))
+OA_male_only <- setdiff(rownames(sig_OA_M), rownames(sig_OA_F))
+
+# now compiling results 
+
+genelist_OA_F <- res_OA_F$log2FoldChange
+names(genelist_OA_F) <- rownames(res_OA_F)
+genelist_OA_F <- sort(genelist_OA_F, decreasing = TRUE)
+
+genelist_OA_M <- res_OA_M$log2FoldChange
+names(genelist_OA_M) <- rownames(res_OA_M)
+genelist_OA_M <- sort(genelist_OA_M, decreasing = TRUE)
+
+genelist_OA_Mint <- res_OA_Mint$log2FoldChange
+names(genelist_OA_Mint) <- rownames(res_OA_Mint)
+genelist_OA_Mint <- sort(genelist_OA_Mint, decreasing = TRUE)
+
+# applying gene symbol labels to make plots clearer
+
+# Female
+OA_F_gene_symbols <- mapIds(
+  org.Hs.eg.db,
+  keys = rownames(res_OA_F),
+  column = "SYMBOL",
+  keytype = "ENTREZID",
+  multiVals = "first")
+
+res_OA_F$symbol <- OA_F_gene_symbols
+
+OA_F_gene_symbols[is.na(OA_F_gene_symbols)] <- rownames(res_OA_F)[is.na(OA_F_gene_symbols)]
+
+res_OA_F$symbol <- OA_F_gene_symbols
+
+# Male
+OA_M_gene_symbols <- mapIds(
+  org.Hs.eg.db,
+  keys = rownames(res_OA_M),
+  column = "SYMBOL",
+  keytype = "ENTREZID",
+  multiVals = "first")
+
+res_OA_M$symbol <- OA_M_gene_symbols
+
+OA_M_gene_symbols[is.na(OA_M_gene_symbols)] <- rownames(res_OA_M)[is.na(OA_M_gene_symbols)]
+
+res_OA_M$symbol <- OA_M_gene_symbols
+
+# Sex-interactions
+OA_Mint_gene_symbols <- mapIds(
+  org.Hs.eg.db,
+  keys = rownames(res_OA_Mint),
+  column = "SYMBOL",
+  keytype = "ENTREZID",
+  multiVals = "first")
+
+res_OA_Mint$symbol <- OA_Mint_gene_symbols
+
+OA_Mint_gene_symbols[is.na(OA_Mint_gene_symbols)] <- rownames(res_OA_Mint)[is.na(OA_Mint_gene_symbols)]
+
+res_OA_Mint$symbol <- OA_Mint_gene_symbols
+
+# then plotting established RA contrasts
+
+# starting with plotting female contrasts
+
+volFOAVNorm_cap <- paste(
+  "Figure 20. Volcano plot of differential gene expression in female Osteoarthritis (OA) versus normal synovial tissue.",
+  "Log2 fold change is plotted against –log10 adjusted p-values.",
+  "Significance thresholds: adjusted p-value < 0.05 and |log2 fold change| > 1 (DESeq2).")
+
+volFOAVNorm_wrap <- paste(strwrap(volFOAVNorm_cap, width = 100), collapse = "\n")
+
+EnhancedVolcano(
+  res_OA_F,
+  lab = res_OA_F$symbol, 
+  x = 'log2FoldChange',
+  y = 'padj', 
+  pCutoff = 0.05,
+  FCcutoff = 1) + labs(caption = volFOAVNorm_wrap) + theme(
+    plot.caption = element_text(hjust = 0, size = 12))
+
+# then plotting male contrasts
+
+volMOAVNorm_cap <- paste(
+  "Figure 21. Volcano plot of differential gene expression in male Osteoarthritis (OA)) versus normal synovial tissue.",
+  "Log2 fold change is plotted against –log10 adjusted p-values.",
+  "Significance thresholds: adjusted p-value < 0.05 and |log2 fold change| > 1 (DESeq2).")
+
+volMOAVNorm_wrap <- paste(strwrap(volMOAVNorm_cap, width = 100), collapse = "\n")
+
+EnhancedVolcano(
+  res_OA_M,
+  lab = res_OA_M$symbol, 
+  x = 'log2FoldChange',
+  y = 'padj', 
+  pCutoff = 0.05,
+  FCcutoff = 1) + labs(caption = volMOAVNorm_wrap) + theme(
+    plot.caption = element_text(hjust = 0, size = 12))
+
+# Then plotting sex interactions
+volMintOAVNorm_cap <- paste(
+  "Figure 22. Volcano plot of differential gene expression of Sex-Interactions in Osteoarthritis (OA) versus normal synovial tissue.",
+  "Log2 fold change is plotted against –log10 adjusted p-values.",
+  "Significance thresholds: adjusted p-value < 0.05 and |log2 fold change| > 1 (DESeq2).")
+
+volMintOAVNorm_wrap <- paste(strwrap(volMintOAVNorm_cap, width = 100), collapse = "\n")
+
+EnhancedVolcano(
+  res_OA_Mint,
+  lab = res_OA_Mint$symbol, 
+  x = 'log2FoldChange',
+  y = 'padj', 
+  pCutoff = 0.05,
+  FCcutoff = 1) + labs(caption = volMintOAVNorm_wrap) + theme(
+    plot.caption = element_text(hjust = 0, size = 12))
+
+
+# ARTH-DGEA -----------------------------------------------------------------
+
+# Now contrasting with OA vs normal in females
+
+res_ARTH_F <- results(dds, name = "disease_Arthralgia_vs_Normal")
+
+# then checking OA vs normal in males for interactions
+
+res_ARTH_Mint <- results(dds, name = "diseaseArthralgia.SexM" )
+
+res_ARTH_M <- results(dds,
+                    contrast = list(c("disease_Arthralgia_vs_Normal",
+                                      "diseaseArthralgia.SexM" )))
+
+# Now filtering results
+
+sig_ARTH_F <- res_ARTH_F[
+  !is.na(res_ARTH_F$padj) &
+    res_ARTH_F$padj < 0.05 &
+    abs(res_ARTH_F$log2FoldChange) > 0.5,]
+
+sig_ARTH_M <- res_ARTH_M[
+  !is.na(res_ARTH_M$padj) &
+    res_ARTH_M$padj < 0.05 &
+    abs(res_ARTH_M$log2FoldChange) > 0.5,]
+
+sig_ARTH_Mint <- res_ARTH_Mint[
+  !is.na(res_ARTH_Mint$padj) &
+    res_ARTH_Mint$padj < 0.05 &
+    abs(res_ARTH_Mint$log2FoldChange) > 0.5,]
+
+# Overlap analysis of OA genes
+
+ARTH_common_genes <- intersect(rownames(sig_ARTH_F), rownames(sig_ARTH_M))
+ARTH_female_only <- setdiff(rownames(sig_ARTH_F), rownames(sig_ARTH_M))
+ARTH_male_only <- setdiff(rownames(sig_ARTH_M), rownames(sig_ARTH_F))
+
+# now compiling results 
+
+genelist_ARTH_F <- res_ARTH_F$log2FoldChange
+names(genelist_ARTH_F) <- rownames(res_ARTH_F)
+genelist_ARTH_F <- sort(genelist_ARTH_F, decreasing = TRUE)
+
+genelist_ARTH_M <- res_ARTH_M$log2FoldChange
+names(genelist_ARTH_M) <- rownames(res_ARTH_M)
+genelist_ARTH_M <- sort(genelist_ARTH_M, decreasing = TRUE)
+
+genelist_ARTH_Mint <- res_ARTH_Mint$log2FoldChange
+names(genelist_ARTH_Mint) <- rownames(res_ARTH_Mint)
+genelist_ARTH_Mint <- sort(genelist_ARTH_Mint, decreasing = TRUE)
+
+# applying gene symbol labels to make plots clearer
+
+# Female
+ARTH_F_gene_symbols <- mapIds(
+  org.Hs.eg.db,
+  keys = rownames(res_ARTH_F),
+  column = "SYMBOL",
+  keytype = "ENTREZID",
+  multiVals = "first")
+
+res_ARTH_F$symbol <- ARTH_F_gene_symbols
+
+ARTH_F_gene_symbols[is.na(ARTH_F_gene_symbols)] <- rownames(res_ARTH_F)[is.na(ARTH_F_gene_symbols)]
+
+res_ARTH_F$symbol <- ARTH_F_gene_symbols
+
+# Male
+ARTH_M_gene_symbols <- mapIds(
+  org.Hs.eg.db,
+  keys = rownames(res_ARTH_M),
+  column = "SYMBOL",
+  keytype = "ENTREZID",
+  multiVals = "first")
+
+res_ARTH_M$symbol <- ARTH_M_gene_symbols
+
+ARTH_M_gene_symbols[is.na(ARTH_M_gene_symbols)] <- rownames(res_ARTH_M)[is.na(ARTH_M_gene_symbols)]
+
+res_ARTH_M$symbol <- ARTH_M_gene_symbols
+
+# Sex-interactions
+ARTH_Mint_gene_symbols <- mapIds(
+  org.Hs.eg.db,
+  keys = rownames(res_ARTH_Mint),
+  column = "SYMBOL",
+  keytype = "ENTREZID",
+  multiVals = "first")
+
+res_ARTH_Mint$symbol <- ARTH_Mint_gene_symbols
+
+ARTH_Mint_gene_symbols[is.na(ARTH_Mint_gene_symbols)] <- rownames(res_ARTH_Mint)[is.na(ARTH_Mint_gene_symbols)]
+
+res_ARTH_Mint$symbol <- ARTH_Mint_gene_symbols
+
+# then plotting established RA contrasts
+
+# starting with plotting female contrasts
+
+volFARTHVNorm_cap <- paste(
+  "Figure 25. Volcano plot of differential gene expression in female Arthralgia versus normal synovial tissue.",
+  "Log2 fold change is plotted against –log10 adjusted p-values.",
+  "Significance thresholds: adjusted p-value < 0.05 and |log2 fold change| > 1 (DESeq2).")
+
+volFARTHVNorm_wrap <- paste(strwrap(volFARTHVNorm_cap, width = 100), collapse = "\n")
+
+EnhancedVolcano(
+  res_ARTH_F,
+  lab = res_ARTH_F$symbol, 
+  x = 'log2FoldChange',
+  y = 'padj', 
+  pCutoff = 0.05,
+  FCcutoff = 1) + labs(caption = volFARTHVNorm_wrap) + theme(
+    plot.caption = element_text(hjust = 0, size = 12))
+
+# then plotting male contrasts
+
+volMARTHVNorm_cap <- paste(
+  "Figure 26. Volcano plot of differential gene expression in male Arthralgia versus normal synovial tissue.",
+  "Log2 fold change is plotted against –log10 adjusted p-values.",
+  "Significance thresholds: adjusted p-value < 0.05 and |log2 fold change| > 1 (DESeq2).")
+
+volMARTHVNorm_wrap <- paste(strwrap(volMARTHVNorm_cap, width = 100), collapse = "\n")
+
+EnhancedVolcano(
+  res_ARTH_M,
+  lab = res_ARTH_M$symbol, 
+  x = 'log2FoldChange',
+  y = 'padj', 
+  pCutoff = 0.05,
+  FCcutoff = 1) + labs(caption = volMARTHVNorm_wrap) + theme(
+    plot.caption = element_text(hjust = 0, size = 12))
+
+# Then plotting sex interactions
+volMintARTHVNorm_cap <- paste(
+  "Figure 27. Volcano plot of differential gene expression of Sex-Interactions in Arthralgia versus normal synovial tissue.",
+  "Log2 fold change is plotted against –log10 adjusted p-values.",
+  "Significance thresholds: adjusted p-value < 0.05 and |log2 fold change| > 1 (DESeq2).")
+
+volMintARTHVNorm_wrap <- paste(strwrap(volMintARTHVNorm_cap, width = 100), collapse = "\n")
+
+EnhancedVolcano(
+  res_ARTH_Mint,
+  lab = res_ARTH_Mint$symbol, 
+  x = 'log2FoldChange',
+  y = 'padj', 
+  pCutoff = 0.05,
+  FCcutoff = 1) + labs(caption = volMintARTHVNorm_wrap) + theme(
+    plot.caption = element_text(hjust = 0, size = 12))
+
+# After combing through controlled contrasted gene expression, visualization 
+# of gene expression through volcano plots can help give a good idea
+# of what genes to target in KEGG enrichment.
+
+
+# 04-enrichment-analysis --------------------------------------------------
+
+
+
+# after visualization of significantly expressed genes, enrichment can occur.
+
+
+# RAest KEGG & GO enrichment and extraction ------------------------------------
+
+# KEGG extraction of female samples
+
+gse_RAest_F <- gseKEGG(geneList = genelist_RAest_F, organism = "hsa")
+
+dotplot(gse_RAest_F, showCategory = 10) +
+  ggtitle("10 most significant KEGG enriched Female RAest Pathways")
+
+# KEGG extraction of male samples
+
+gse_RAest_M <- gseKEGG(geneList = genelist_RAest_M, organism = "hsa")
+
+dotplot(gse_RAest_M, showCategory = 10) +
+  ggtitle("10 most significant KEGG enriched Male RAest Pathways")
+
+# KEGG extraction of male and female differences
+
+gse_RAest_Mint <- gseKEGG(geneList = genelist_RAest_Mint, organism = "hsa")
+
+dotplot(gse_RAest_Mint, showCategory = 10) +
+  ggtitle("10 most significant KEGG enriched Sex interaction in RAest Pathways")
+
+# summary KEGG
+
+KEGG_RAest_top_F <- gse_RAest_F@result[1:15, c("Description", "p.adjust")]
+KEGG_RAest_top_F$Group <- "Female"
+
+KEGG_RAest_top_M <- gse_RAest_M@result[1:15, c("Description", "p.adjust")]
+KEGG_RAest_top_M$Group <- "Male"
+
+KEGG_RAest_top_Mint <- gse_RAest_Mint@result[1:15, c("Description", "p.adjust")]
+KEGG_RAest_top_Mint$Group <- "Interaction"
+
+KEGG_RAest_combined <- rbind(KEGG_RAest_top_F, KEGG_RAest_top_M, KEGG_RAest_top_Mint)
+
+KEGG_RAest_master_table <- KEGG_RAest_combined %>%
+  mutate(present = TRUE) %>%
+  pivot_wider(
+    names_from = Group,
+    values_from = present,
+    values_fill = list(present = FALSE),
+    values_fn = list(present = any))
+
+mpKEGG_RAest_cap <- paste(
+  "Figure 13. KEGG pathway enrichment dotplot of sex-specific transcriptional differences across established RA. Pathways identified via GSEA are",  
+  "displayed with statistical significance on the y-axis, dot size representing gene the logged adjusted p-value. Analysis was performed using clusterProfiler gseKEGG, organism = “hsa”",
+  "Significance thresholds: adjusted p-value < 0.05 and |log2 fold change| > 1 (DESeq2).")
+
+mpKEGG_RAest_wrap <- paste(strwrap(mpKEGG_RAest_cap, width = 100), collapse = "\n")
+
+ggplot(KEGG_RAest_combined, aes(x = Group, y = Description)) +
+  geom_point(aes(size = -log10(p.adjust))) +
+  theme_bw() + labs(caption = mpKEGG_RAest_wrap) + theme(
+    plot.caption = element_text(hjust = 0.5, size = 12))
+
+
+KEGG_RAest_master_table$Category <- case_when(
+  KEGG_RAest_master_table$Female & KEGG_RAest_master_table$Male & !KEGG_RAest_master_table$Interaction ~ "Shared",
+  KEGG_RAest_master_table$Interaction ~ "Sex-differential",
+  KEGG_RAest_master_table$Female & !KEGG_RAest_master_table$Male ~ "Female-specific",
+  KEGG_RAest_master_table$Male & !KEGG_RAest_master_table$Female ~ "Male-specific",
+  TRUE ~ "Other")
+
+#
+#
+print(KEGG_RAest_master_table, n = 39)
+{
+# A tibble: 39 × 6
+# Description                                                   p.adjust Female Male  Interaction Category        
+# <chr>                                                            <dbl> <lgl>  <lgl> <lgl>       <chr>           
+#   1 Viral protein interaction with cytokine and cytokine receptor  3.51e-9 TRUE   FALSE FALSE       Female-specific 
+# 2 Cytoskeleton in muscle cells                                   3.51e-9 TRUE   FALSE FALSE       Female-specific 
+# 3 Type I diabetes mellitus                                       3.51e-9 TRUE   FALSE FALSE       Female-specific 
+# 4 Rheumatoid arthritis                                           3.51e-9 TRUE   FALSE FALSE       Female-specific 
+# 5 Graft-versus-host disease                                      3.51e-9 TRUE   FALSE FALSE       Female-specific 
+# 6 Staphylococcus aureus infection                                3.51e-9 TRUE   FALSE FALSE       Female-specific 
+# 7 Systemic lupus erythematosus                                   3.51e-9 TRUE   FALSE FALSE       Female-specific 
+# 8 Cornified envelope formation                                   3.51e-9 TRUE   FALSE FALSE       Female-specific 
+# 9 Hematopoietic cell lineage                                     3.51e-9 TRUE   FALSE FALSE       Female-specific 
+# 10 Cytokine-cytokine receptor interaction                         3.51e-9 TRUE   FALSE FALSE       Female-specific 
+# 11 Cardiac muscle contraction                                     4.40e-9 TRUE   FALSE FALSE       Female-specific 
+# 12 Allograft rejection                                            8.56e-9 TRUE   FALSE FALSE       Female-specific 
+# 13 Neutrophil extracellular trap formation                        6.52e-8 TRUE   FALSE FALSE       Female-specific 
+# 14 Hypertrophic cardiomyopathy                                    7.15e-8 TRUE   FALSE FALSE       Female-specific 
+# 15 Autoimmune thyroid disease                                     8.14e-8 TRUE   FALSE FALSE       Female-specific 
+# 16 Viral protein interaction with cytokine and cytokine receptor  1.10e-8 FALSE  TRUE  FALSE       Male-specific   
+# 17 Olfactory transduction                                         1.10e-8 FALSE  TRUE  FALSE       Male-specific   
+# 18 Cytokine-cytokine receptor interaction                         1.10e-8 FALSE  TRUE  FALSE       Male-specific   
+# 19 IL-17 signaling pathway                                        1.51e-6 FALSE  TRUE  FALSE       Male-specific   
+# 20 Staphylococcus aureus infection                                3.88e-6 FALSE  TRUE  FALSE       Male-specific   
+# 21 Rheumatoid arthritis                                           3.80e-5 FALSE  TRUE  FALSE       Male-specific   
+# 22 Coronavirus disease - COVID-19                                 5.77e-5 FALSE  TRUE  FALSE       Male-specific   
+# 23 Porphyrin metabolism                                           1.47e-4 FALSE  TRUE  FALSE       Male-specific   
+# 24 Endocrine resistance                                           5.52e-4 FALSE  TRUE  FALSE       Male-specific   
+# 25 Graft-versus-host disease                                      5.52e-4 FALSE  TRUE  FALSE       Male-specific   
+# 26 Systemic lupus erythematosus                                   5.52e-4 FALSE  TRUE  FALSE       Male-specific   
+# 27 Ascorbate and aldarate metabolism                              9.08e-4 FALSE  TRUE  FALSE       Male-specific   
+# 28 Hematopoietic cell lineage                                     1.57e-3 FALSE  TRUE  FALSE       Male-specific   
+# 29 Malaria                                                        1.73e-3 FALSE  TRUE  FALSE       Male-specific   
+# 30 Cornified envelope formation                                   1.73e-3 FALSE  TRUE  FALSE       Male-specific   
+# 31 Cytoskeleton in muscle cells                                   1.58e-8 FALSE  FALSE TRUE        Sex-differential
+# 32 Olfactory transduction                                         1.58e-8 FALSE  FALSE TRUE        Sex-differential
+# 33 Hypertrophic cardiomyopathy                                    4.37e-5 FALSE  FALSE TRUE        Sex-differential
+# 34 Motor proteins                                                 4.37e-5 FALSE  FALSE TRUE        Sex-differential
+# 35 Dilated cardiomyopathy                                         1.36e-4 FALSE  FALSE TRUE        Sex-differential
+# 36 Cardiac muscle contraction                                     1.52e-3 FALSE  FALSE TRUE        Sex-differential
+# 37 Ribosome                                                       1.35e-2 FALSE  FALSE TRUE        Sex-differential
+# 38 Ribosome biogenesis in eukaryotes                              1.56e-2 FALSE  FALSE TRUE        Sex-differential
+}
+#
+#
+
+# GO extraction of female samples
+
+go_RAest_F <- gseGO(
+  geneList = genelist_RAest_F,
+  OrgDb = org.Hs.eg.db,
+  keyType = "ENTREZID",
+  ont = "BP", 
+  pAdjustMethod = "BH",
+  pvalueCutoff = 0.05)
+
+dotplot(go_RAest_F, showCategory = 10) +
+  ggtitle("10 most significant GO enriched Female RAest Pathways")
+
+# GO extraction of male samples
+
+go_RAest_M <- gseGO(
+  geneList = genelist_RAest_M,
+  OrgDb = org.Hs.eg.db,
+  keyType = "ENTREZID",
+  ont = "BP", 
+  pAdjustMethod = "BH",
+  pvalueCutoff = 0.05)
+
+dotplot(go_RAest_M, showCategory = 10) +
+  ggtitle("10 most significant GO enriched male RAest Pathways")
+
+# GO extraction of male and female differences
+
+go_RAest_Mint <- gseGO(
+  geneList = genelist_RAest_Mint,
+  OrgDb = org.Hs.eg.db,
+  keyType = "ENTREZID",
+  ont = "BP", 
+  pAdjustMethod = "BH",
+  pvalueCutoff = 0.05)
+
+dotplot(go_RAest_Mint, showCategory = 10) +
+  ggtitle("10 most significant GO enriched sex-difference RAest Pathways")
+
+# summary GO
+
+GO_RAest_top_F <- go_RAest_F@result[1:15, c("Description", "p.adjust")]
+GO_RAest_top_F$Group <- "Female"
+
+GO_RAest_top_M <- go_RAest_M@result[1:15, c("Description", "p.adjust")]
+GO_RAest_top_M$Group <- "Male"
+
+GO_RAest_top_Mint <- go_RAest_Mint@result[1:15, c("Description", "p.adjust")]
+GO_RAest_top_Mint$Group <- "Interaction"
+
+GO_RAest_combined <- rbind(GO_RAest_top_F, GO_RAest_top_M, GO_RAest_top_Mint)
+
+GO_RAest_master_table <- GO_RAest_combined %>%
+  mutate(present = TRUE) %>%
+  pivot_wider(
+    names_from = Group,
+    values_from = present,
+    values_fill = list(present = FALSE),
+    values_fn = list(present = any))
+
+mpGO_RAest_cap <- paste(
+  "Figure 14. GO pathway enrichment dotplot of sex-specific transcriptional differences across established RA. Pathways identified via GSEA are",  
+  "displayed with statistical significance on the y-axis, dot size representing gene the log of the adjusted p-value. Analysis was performed using clusterProfiler gseGO, organism = “hsa”",
+  "Significance thresholds: adjusted p-value < 0.05 and |log2 fold change| > 1 (DESeq2).")
+
+mpGO_RAest_wrap <- paste(strwrap(mpGO_RAest_cap, width = 100), collapse = "\n")
+
+ggplot(GO_RAest_combined, aes(x = Group, y = Description)) +
+  geom_point(aes(size = -log10(p.adjust))) +
+  theme_bw() + labs(caption = mpGO_RAest_wrap) + theme(
+    plot.caption = element_text(hjust = 0.8, size = 12))
+
+GO_RAest_master_table$Category <- case_when(
+  GO_RAest_master_table$Female & GO_RAest_master_table$Male & !GO_RAest_master_table$Interaction ~ "Shared",
+  GO_RAest_master_table$Interaction ~ "Sex-differential",
+  GO_RAest_master_table$Female & !GO_RAest_master_table$Male ~ "Female-specific",
+  GO_RAest_master_table$Male & !GO_RAest_master_table$Female ~ "Male-specific",
+  TRUE ~ "Other")
+
+#
+#Printing master table
+print(GO_RAest_master_table, n = 39)
+{
+# Description                                                               p.adjust Female Male  Interaction Category
+# <chr>                                                                        <dbl> <lgl>  <lgl> <lgl>       <chr>   
+# 1 immunoglobulin mediated immune response                                    8.5 e-9 TRUE   FALSE FALSE       Female-…
+# 2 B cell mediated immunity                                                   8.5 e-9 TRUE   FALSE FALSE       Female-…
+# 3 lymphocyte mediated immunity                                               8.5 e-9 TRUE   FALSE FALSE       Female-…
+# 4 adaptive immune response based on somatic recombination of immune recept…  8.5 e-9 TRUE   FALSE FALSE       Female-…
+# 5 keratinization                                                             8.5 e-9 TRUE   FALSE FALSE       Female-…
+# 6 myofibril assembly                                                         8.5 e-9 TRUE   FALSE FALSE       Female-…
+# 7 leukocyte mediated immunity                                                8.5 e-9 TRUE   FALSE FALSE       Female-…
+# 8 keratinocyte differentiation                                               8.5 e-9 TRUE   FALSE FALSE       Female-…
+# 9 humoral immune response                                                    8.5 e-9 TRUE   FALSE FALSE       Female-…
+# 10 antimicrobial humoral response                                             8.5 e-9 TRUE   FALSE FALSE       Female-…
+# 11 B cell receptor signaling pathway                                          8.5 e-9 TRUE   FALSE FALSE       Female-…
+# 12 muscle cell development                                                    8.5 e-9 TRUE   FALSE FALSE       Female-…
+# 13 skeletal muscle contraction                                                8.5 e-9 TRUE   FALSE FALSE       Female-…
+# 14 striated muscle cell development                                           8.5 e-9 TRUE   FALSE FALSE       Female-…
+# 15 antimicrobial humoral immune response mediated by antimicrobial peptide    8.5 e-9 TRUE   FALSE FALSE       Female-…
+# 16 miRNA-mediated gene silencing by mRNA destabilization                      3.34e-8 FALSE  TRUE  FALSE       Male-sp…
+# 17 immunoglobulin mediated immune response                                    3.34e-8 FALSE  TRUE  FALSE       Male-sp…
+# 18 B cell mediated immunity                                                   3.34e-8 FALSE  TRUE  FALSE       Male-sp…
+# 19 antimicrobial humoral response                                             3.34e-8 FALSE  TRUE  FALSE       Male-sp…
+# 20 antimicrobial humoral immune response mediated by antimicrobial peptide    3.34e-8 FALSE  TRUE  FALSE       Male-sp…
+# 21 humoral immune response                                                    3.34e-8 FALSE  TRUE  FALSE       Male-sp…
+# 22 killing of cells of another organism                                       3.34e-8 FALSE  TRUE  FALSE       Male-sp…
+# 23 disruption of cell in another organism                                     3.34e-8 FALSE  TRUE  FALSE       Male-sp…
+# 24 disruption of anatomical structure in another organism                     3.34e-8 FALSE  TRUE  FALSE       Male-sp…
+# 25 detection of chemical stimulus involved in sensory perception of smell     3.34e-8 FALSE  TRUE  FALSE       Male-sp…
+# 26 sensory perception of smell                                                3.34e-8 FALSE  TRUE  FALSE       Male-sp…
+# 27 detection of chemical stimulus involved in sensory perception              3.34e-8 FALSE  TRUE  FALSE       Male-sp…
+# 28 lymphocyte mediated immunity                                               3.34e-8 FALSE  TRUE  FALSE       Male-sp…
+# 29 adaptive immune response based on somatic recombination of immune recept…  3.34e-8 FALSE  TRUE  FALSE       Male-sp…
+# 30 detection of chemical stimulus                                             3.34e-8 FALSE  TRUE  FALSE       Male-sp…
+# 31 detection of chemical stimulus involved in sensory perception of smell     1.53e-7 FALSE  FALSE TRUE        Sex-dif…
+# 32 sensory perception of smell                                                1.53e-7 FALSE  FALSE TRUE        Sex-dif…
+# 33 detection of chemical stimulus involved in sensory perception              1.53e-7 FALSE  FALSE TRUE        Sex-dif…
+# 34 detection of chemical stimulus                                             1.53e-7 FALSE  FALSE TRUE        Sex-dif…
+# 35 muscle organ morphogenesis                                                 2.68e-7 FALSE  FALSE TRUE        Sex-dif…
+# 36 muscle tissue morphogenesis                                                5.49e-7 FALSE  FALSE TRUE        Sex-dif…
+# 37 cardiac muscle tissue morphogenesis                                        3.98e-5 FALSE  FALSE TRUE        Sex-dif…
+# 38 musculoskeletal movement                                                   6.00e-5 FALSE  FALSE TRUE        Sex-dif…
+# 39 keratinization                                                             8.39e-5 FALSE  FALSE TRUE        Sex-dif…
+}
+#
+#
+
+# Making an general gene extraction function.
+
+extract_genes_from_pathway <- function(gse_obj, pathway_name) {
+  genes <- strsplit(
+    gse_obj@result$core_enrichment[gse_obj@result$Description == pathway_name],
+    "/"
+  )[[1]]
+  return(genes)}
+
+# starting with 3 most significant and relevant to RA pathways (which were 
+# chosen based off of their p-adjusted value, gene contribution, relevancy 
+# to RA pathology and peripheral presence, and relevancy to the sex-differences
+# in transcriptomics -> pathway only shows up in interaction and one of the 
+# sexes, not both.), then doing 3 from male and female KEGG extraction
+
+{
+# Cytoskeleton in muscle cells pathway extraction and processing in interactions group
+gse_RAest_Mint_Cytomusc_genes <- extract_genes_from_pathway(gse_RAest_Mint, "Cytoskeleton in muscle cells")
+
+gse_RAest_Mint_Cytomusc_valid_genes <- intersect(gse_RAest_Mint_Cytomusc_genes, rownames(res_RAest_Mint))  
+  
+gse_RAest_Mint_Cytomusc_df <- data.frame(gene = gse_RAest_Mint_Cytomusc_genes,
+                                         log2FC = res_RAest_Mint[gse_RAest_Mint_Cytomusc_genes, "log2FoldChange"],
+                                         padj = res_RAest_Mint[gse_RAest_Mint_Cytomusc_genes, "padj"])
+
+gse_RAest_Mint_Cytomusc_dffilt <- gse_RAest_Mint_Cytomusc_df %>%
+  filter(!is.na(padj)) %>%
+  filter(padj < 0.05) %>%
+  arrange(-abs(log2FC)) %>%
+  head(10)
+
+gse_RAest_Mint_Cytomusc_dffilt <- gse_RAest_Mint_Cytomusc_dffilt %>%
+  mutate(
+    pathway = "Cytoskeleton in muscle cells",
+    group = "Interaction")
+
+# Olfactory transduction pathway extraction and processing in interactions group
+gse_RAest_Mint_OlfTran_genes <- extract_genes_from_pathway(gse_RAest_Mint, "Olfactory transduction")
+
+gse_RAest_Mint_OlfTran_valid_genes <- intersect(gse_RAest_Mint_OlfTran_genes, rownames(res_RAest_Mint))  
+
+gse_RAest_Mint_OlfTran_df <- data.frame(gene = gse_RAest_Mint_OlfTran_genes,
+                                         log2FC = res_RAest_Mint[gse_RAest_Mint_OlfTran_genes, "log2FoldChange"],
+                                         padj = res_RAest_Mint[gse_RAest_Mint_OlfTran_genes, "padj"])
+
+gse_RAest_Mint_OlfTran_dffilt <- gse_RAest_Mint_OlfTran_df %>%
+  filter(!is.na(padj)) %>%
+  filter(padj < 0.05) %>%
+  arrange(-abs(log2FC)) %>%
+  head(10)
+
+gse_RAest_Mint_OlfTran_dffilt <- gse_RAest_Mint_OlfTran_dffilt %>%
+  mutate(
+    pathway = "Olfactory transduction",
+    group = "Interaction")
+
+# Hypertrophic cardiomyopathy pathway extraction and processing in interactions group 
+gse_RAest_Mint_HypCar_genes <- extract_genes_from_pathway(gse_RAest_Mint, "Hypertrophic cardiomyopathy")
+
+gse_RAest_Mint_HypCar_valid_genes <- intersect(gse_RAest_Mint_HypCar_genes, rownames(res_RAest_Mint))  
+
+gse_RAest_Mint_HypCar_df <- data.frame(gene = gse_RAest_Mint_HypCar_genes,
+                                        log2FC = res_RAest_Mint[gse_RAest_Mint_HypCar_genes, "log2FoldChange"],
+                                        padj = res_RAest_Mint[gse_RAest_Mint_HypCar_genes, "padj"])
+
+gse_RAest_Mint_HypCar_dffilt <- gse_RAest_Mint_HypCar_df %>%
+  filter(!is.na(padj)) %>%
+  filter(padj < 0.05) %>%
+  arrange(-abs(log2FC)) %>%
+  head(10)
+
+gse_RAest_Mint_HypCar_dffilt <- gse_RAest_Mint_HypCar_dffilt %>%
+  mutate(
+    pathway = "Olfactory transduction",
+    group = "Interaction")
+
+# now doing extracting and processing on male and female groups
+# Cyto-cyto pathway extraction and processing because its shared
+gse_RAest_F_CytCyt_genes <- extract_genes_from_pathway(gse_RAest_F, "Cytokine-cytokine receptor interaction")
+
+gse_RAest_F_CytCyt_valid_genes <- intersect(gse_RAest_F_CytCyt_genes, rownames(res_RAest_F))  
+
+gse_RAest_F_CytCyt_df <- data.frame(gene = gse_RAest_F_CytCyt_genes,
+                                       log2FC = res_RAest_F[gse_RAest_F_CytCyt_genes, "log2FoldChange"],
+                                       padj = res_RAest_F[gse_RAest_F_CytCyt_genes, "padj"])
+
+gse_RAest_F_CytCyt_dffilt <- gse_RAest_F_CytCyt_df %>%
+  filter(!is.na(padj)) %>%
+  filter(padj < 0.05) %>%
+  arrange(-abs(log2FC)) %>%
+  head(10)
+
+gse_RAest_F_CytCyt_dffilt <- gse_RAest_F_CytCyt_dffilt %>%
+  mutate(
+    pathway = "Cytokine-cytokine receptor interaction",
+    group = "Female")
+
+# Hematopoietic cell lineage pathway extraction and processing in female group
+gse_RAest_F_Hema_genes <- extract_genes_from_pathway(gse_RAest_F, "Hematopoietic cell lineage")
+
+gse_RAest_F_Hema_valid_genes <- intersect(gse_RAest_F_Hema_genes, rownames(res_RAest_F))  
+
+gse_RAest_F_Hema_df <- data.frame(gene = gse_RAest_F_Hema_genes,
+                                    log2FC = res_RAest_F[gse_RAest_F_Hema_genes, "log2FoldChange"],
+                                    padj = res_RAest_F[gse_RAest_F_Hema_genes, "padj"])
+
+gse_RAest_F_Hema_dffilt <- gse_RAest_F_Hema_df %>%
+  filter(!is.na(padj)) %>%
+  filter(padj < 0.05) %>%
+  arrange(-abs(log2FC)) %>%
+  head(10)
+
+gse_RAest_F_Hema_dffilt <- gse_RAest_F_Hema_dffilt %>%
+  mutate(
+    pathway = "Hematopoietic cell lineage",
+    group = "Female")
+
+# Allograft rejection pathway extraction and processing in female group
+gse_RAest_F_Allo_genes <- extract_genes_from_pathway(gse_RAest_F, "Allograft rejection")
+
+gse_RAest_F_Allo_valid_genes <- intersect(gse_RAest_F_Allo_genes, rownames(res_RAest_F))  
+
+gse_RAest_F_Allo_df <- data.frame(gene = gse_RAest_F_Allo_genes,
+                                  log2FC = res_RAest_F[gse_RAest_F_Allo_genes, "log2FoldChange"],
+                                  padj = res_RAest_F[gse_RAest_F_Allo_genes, "padj"])
+
+gse_RAest_F_Allo_dffilt <- gse_RAest_F_Allo_df %>%
+  filter(!is.na(padj)) %>%
+  filter(padj < 0.05) %>%
+  arrange(-abs(log2FC)) %>%
+  head(10)
+
+gse_RAest_F_Allo_dffilt <- gse_RAest_F_Allo_dffilt %>%
+  mutate(
+    pathway = "Allograft rejection",
+    group = "Female")
+
+# Male Cyto-cyto pathway extraction and processing because its shared
+gse_RAest_M_CytCyt_genes <- extract_genes_from_pathway(gse_RAest_M, "Cytokine-cytokine receptor interaction")
+
+gse_RAest_M_CytCyt_valid_genes <- intersect(gse_RAest_M_CytCyt_genes, rownames(res_RAest_M))  
+
+gse_RAest_M_CytCyt_df <- data.frame(gene = gse_RAest_M_CytCyt_genes,
+                                  log2FC = res_RAest_M[gse_RAest_M_CytCyt_genes, "log2FoldChange"],
+                                  padj = res_RAest_M[gse_RAest_M_CytCyt_genes, "padj"])
+
+gse_RAest_M_CytCyt_dffilt <- gse_RAest_M_CytCyt_df %>%
+  filter(!is.na(padj)) %>%
+  filter(padj < 0.05) %>%
+  arrange(-abs(log2FC)) %>%
+  head(10)
+
+gse_RAest_M_CytCyt_dffilt <- gse_RAest_M_CytCyt_dffilt %>%
+  mutate(
+    pathway = "Cytokine-cytokine receptor interaction",
+    group = "Male")
+
+# Male IL-17 signaling pathway extraction and processing
+gse_RAest_M_IL17_genes <- extract_genes_from_pathway(gse_RAest_M, "IL-17 signaling pathway")
+
+gse_RAest_M_IL17_valid_genes <- intersect(gse_RAest_M_IL17_genes, rownames(res_RAest_M))  
+
+gse_RAest_M_IL17_df <- data.frame(gene = gse_RAest_M_IL17_genes,
+                                    log2FC = res_RAest_M[gse_RAest_M_IL17_genes, "log2FoldChange"],
+                                    padj = res_RAest_M[gse_RAest_M_IL17_genes, "padj"])
+
+gse_RAest_M_IL17_dffilt <- gse_RAest_M_IL17_df %>%
+  filter(!is.na(padj)) %>%
+  filter(padj < 0.05) %>%
+  arrange(-abs(log2FC)) %>%
+  head(10)
+
+gse_RAest_M_IL17_dffilt <- gse_RAest_M_IL17_dffilt %>%
+  mutate(
+    pathway = "IL-17 signaling pathway",
+    group = "Male")
+
+# Male Porphyrin metabolism pathway extraction and processing
+gse_RAest_M_PorMet_genes <- extract_genes_from_pathway(gse_RAest_M, "Porphyrin metabolism")
+
+gse_RAest_M_PorMet_valid_genes <- intersect(gse_RAest_M_PorMet_genes, rownames(res_RAest_M))  
+
+gse_RAest_M_PorMet_df <- data.frame(gene = gse_RAest_M_PorMet_genes,
+                                  log2FC = res_RAest_M[gse_RAest_M_PorMet_genes, "log2FoldChange"],
+                                  padj = res_RAest_M[gse_RAest_M_PorMet_genes, "padj"])
+
+gse_RAest_M_PorMet_dffilt <- gse_RAest_M_PorMet_df %>%
+  filter(!is.na(padj)) %>%
+  filter(padj < 0.05) %>%
+  arrange(-abs(log2FC)) %>%
+  head(10)
+
+gse_RAest_M_PorMet_dffilt <- gse_RAest_M_PorMet_dffilt %>%
+  mutate(
+    pathway = "Porphyrin metabolism",
+    group = "Male")
+}
+
+#
+#
+#
+# now doing GO extraction
+#
+#
+#
+
+{
+# starting with sex-interaction, doing 3 of sex-int, 2 of female, 2 of male.
+# detection of chemical stimulus involved in sensory perception of smell
+# pathway extraction and processing in interactions group
+go_RAest_Mint_Smell_genes <- extract_genes_from_pathway(go_RAest_Mint, "detection of chemical stimulus involved in sensory perception of smell")
+
+  go_RAest_Mint_Smell_valid_genes <- intersect(go_RAest_Mint_Smell_genes, rownames(res_RAest_Mint))  
+  
+  go_RAest_Mint_Smell_df <- data.frame(gene = go_RAest_Mint_Smell_genes,
+                                      log2FC = res_RAest_Mint[go_RAest_Mint_Smell_genes, "log2FoldChange"],
+                                      padj = res_RAest_Mint[go_RAest_Mint_Smell_genes, "padj"])
+  
+  go_RAest_Mint_Smell_dffilt <- go_RAest_Mint_Smell_df %>%
+    filter(!is.na(padj)) %>%
+    filter(padj < 0.05) %>%
+    arrange(-abs(log2FC)) %>%
+    head(10)
+  
+  go_RAest_Mint_Smell_dffilt <- go_RAest_Mint_Smell_dffilt %>%
+    mutate(
+      pathway = "detection of chemical stimulus involved in sensory perception of smell",
+      group = "Interaction")
+
+# muscle tissue morphogenesis pathway extraction and processing in interactions group
+go_RAest_Mint_MuscMor_genes <- extract_genes_from_pathway(go_RAest_Mint, "muscle tissue morphogenesis")
+
+go_RAest_Mint_MuscMor_valid_genes <- intersect(go_RAest_Mint_MuscMor_genes, rownames(res_RAest_Mint))  
+
+go_RAest_Mint_MuscMor_df <- data.frame(gene = go_RAest_Mint_MuscMor_genes,
+                                     log2FC = res_RAest_Mint[go_RAest_Mint_MuscMor_genes, "log2FoldChange"],
+                                     padj = res_RAest_Mint[go_RAest_Mint_MuscMor_genes, "padj"])
+
+go_RAest_Mint_MuscMor_dffilt <- go_RAest_Mint_MuscMor_df %>%
+  filter(!is.na(padj)) %>%
+  filter(padj < 0.05) %>%
+  arrange(-abs(log2FC)) %>%
+  head(10)
+
+go_RAest_Mint_MuscMor_dffilt <- go_RAest_Mint_MuscMor_dffilt %>%
+  mutate(
+    pathway = "muscle tissue morphogenesis",
+    group = "Interaction")
+
+# now doing extracting and processing on male and female groups
+# immunoglobulin mediated immune response pathway extraction and processing 
+# because its shared
+go_RAest_F_ImmuGlob_genes <- extract_genes_from_pathway(go_RAest_F, "immunoglobulin mediated immune response")
+
+go_RAest_F_ImmuGlob_valid_genes <- intersect(go_RAest_F_ImmuGlob_genes, rownames(res_RAest_F))  
+
+go_RAest_F_ImmuGlob_df <- data.frame(gene = go_RAest_F_ImmuGlob_genes,
+                                       log2FC = res_RAest_F[go_RAest_F_ImmuGlob_genes, "log2FoldChange"],
+                                       padj = res_RAest_F[go_RAest_F_ImmuGlob_genes, "padj"])
+
+go_RAest_F_ImmuGlob_dffilt <- go_RAest_F_ImmuGlob_df %>%
+  filter(!is.na(padj)) %>%
+  filter(padj < 0.05) %>%
+  arrange(-abs(log2FC)) %>%
+  head(10)
+
+go_RAest_F_ImmuGlob_dffilt <- go_RAest_F_ImmuGlob_dffilt %>%
+  mutate(
+    pathway = "immunoglobulin mediated immune response",
+    group = "Female")
+
+# Leukocyte mediated immunity pathway extraction and processing in female group
+go_RAest_F_Leuk_genes <- extract_genes_from_pathway(go_RAest_F, "leukocyte mediated immunity")
+
+go_RAest_F_Leuk_valid_genes <- intersect(go_RAest_F_Leuk_genes, rownames(res_RAest_F))  
+
+go_RAest_F_Leuk_df <- data.frame(gene = go_RAest_F_Leuk_genes,
+                                     log2FC = res_RAest_F[go_RAest_F_Leuk_genes, "log2FoldChange"],
+                                     padj = res_RAest_F[go_RAest_F_Leuk_genes, "padj"])
+
+go_RAest_F_Leuk_dffilt <- go_RAest_F_Leuk_df %>%
+  filter(!is.na(padj)) %>%
+  filter(padj < 0.05) %>%
+  arrange(-abs(log2FC)) %>%
+  head(10)
+
+go_RAest_F_Leuk_dffilt <- go_RAest_F_Leuk_dffilt %>%
+  mutate(
+    pathway = "leukocyte mediated immunity",
+    group = "Female")
+
+# Male immunoglobulin mediated immune response pathway extraction and processing
+go_RAest_M_ImmuGlob_genes <- extract_genes_from_pathway(go_RAest_M, "immunoglobulin mediated immune response")
+
+go_RAest_M_ImmuGlob_valid_genes <- intersect(go_RAest_M_ImmuGlob_genes, rownames(res_RAest_M))  
+
+go_RAest_M_ImmuGlob_df <- data.frame(gene = go_RAest_M_ImmuGlob_genes,
+                                 log2FC = res_RAest_M[go_RAest_M_ImmuGlob_genes, "log2FoldChange"],
+                                 padj = res_RAest_M[go_RAest_M_ImmuGlob_genes, "padj"])
+
+go_RAest_M_ImmuGlob_dffilt <- go_RAest_M_ImmuGlob_df %>%
+  filter(!is.na(padj)) %>%
+  filter(padj < 0.05) %>%
+  arrange(-abs(log2FC)) %>%
+  head(10)
+
+go_RAest_M_ImmuGlob_dffilt <- go_RAest_M_ImmuGlob_dffilt %>%
+  mutate(
+    pathway = "immunoglobulin mediated immune response",
+    group = "Male")
+
+# Male miRNA-mediated gene silencing by mRNA destabilization pathway extraction 
+# and processing because its shared.
+go_RAest_M_miRNAMed_genes <- extract_genes_from_pathway(go_RAest_M, "miRNA-mediated gene silencing by mRNA destabilization")
+
+go_RAest_M_miRNAMed_valid_genes <- intersect(go_RAest_M_miRNAMed_genes, rownames(res_RAest_M))  
+
+go_RAest_M_miRNAMed_df <- data.frame(gene = go_RAest_M_miRNAMed_genes,
+                                     log2FC = res_RAest_M[go_RAest_M_miRNAMed_genes, "log2FoldChange"],
+                                     padj = res_RAest_M[go_RAest_M_miRNAMed_genes, "padj"])
+
+go_RAest_M_miRNAMed_dffilt <- go_RAest_M_miRNAMed_df %>%
+  filter(!is.na(padj)) %>%
+  filter(padj < 0.05) %>%
+  arrange(-abs(log2FC)) %>%
+  head(10)
+
+go_RAest_M_miRNAMed_dffilt <- go_RAest_M_miRNAMed_dffilt %>%
+  mutate(
+    pathway = "miRNA-mediated gene silencing by mRNA destabilization",
+    group = "Male")
+}
+
+#
+#
+#
+# now doing making master dataframe of all RAest extracted genes.
+#
+#
+#
+
+RAest_master_genes <- bind_rows(go_RAest_Mint_Smell_dffilt, 
+                          go_RAest_Mint_MuscMor_dffilt, 
+                          go_RAest_F_ImmuGlob_dffilt, 
+                          go_RAest_F_Leuk_dffilt, 
+                          go_RAest_M_ImmuGlob_dffilt, 
+                          go_RAest_M_miRNAMed_dffilt, 
+                          gse_RAest_Mint_Cytomusc_dffilt, 
+                          gse_RAest_Mint_OlfTran_dffilt, 
+                          gse_RAest_Mint_HypCar_dffilt, 
+                          gse_RAest_F_Hema_dffilt, 
+                          gse_RAest_F_Allo_dffilt,
+                          gse_RAest_F_CytCyt_dffilt, 
+                          gse_RAest_M_CytCyt_dffilt, 
+                          gse_RAest_M_IL17_dffilt, 
+                          gse_RAest_M_PorMet_dffilt)
+
+RAest_master_genes$symbol <- mapIds(
+  org.Hs.eg.db,
+  keys = RAest_master_genes$gene,
+  column = "SYMBOL",
+  keytype = "ENTREZID",
+  multiVals = "first")
+
+RAest_master_genes
+
+# table looks good, saving it.
+write.table(
+  RAest_master_genes,
+  "RAest_master_genes.tsv",
+  sep = "\t",
+  row.names = FALSE,
+  quote = FALSE)
+
+
+# RAear KEGG enrichment and extraction ------------------------------------
+
+# KEGG extraction of female samples
+
+gse_RAear_F <- gseKEGG(geneList = genelist_RAear_F, organism = "hsa")
+
+dotplot(gse_RAear_F, showCategory = 10) +
+  ggtitle("KEGG enriched Female RAear Pathways")
+
+# KEGG extraction of male samples
+
+gse_RAear_M <- gseKEGG(geneList = genelist_RAear_M, organism = "hsa")
+
+dotplot(gse_RAear_M, showCategory = 10) +
+  ggtitle("KEGG enriched Male RAear Pathways")
+
+# KEGG extraction of male and female differences
+
+gse_RAear_Mint <- gseKEGG(geneList = genelist_RAear_Mint, organism = "hsa")
+
+dotplot(gse_RAear_Mint, showCategory = 10) +
+  ggtitle("KEGG enriched Sex interaction in RAear Pathways")
+
+# summary KEGG
+
+KEGG_RAear_top_F <- gse_RAear_F@result[1:15, c("Description", "p.adjust")]
+KEGG_RAear_top_F$Group <- "Female"
+
+KEGG_RAear_top_M <- gse_RAear_M@result[1:15, c("Description", "p.adjust")]
+KEGG_RAear_top_M$Group <- "Male"
+
+KEGG_RAear_top_Mint <- gse_RAear_Mint@result[1:15, c("Description", "p.adjust")]
+KEGG_RAear_top_Mint$Group <- "Interaction"
+
+KEGG_RAear_combined <- rbind(KEGG_RAear_top_F, KEGG_RAear_top_M, KEGG_RAear_top_Mint)
+
+KEGG_RAear_master_table <- KEGG_RAear_combined %>%
+  mutate(present = TRUE) %>%
+  pivot_wider(
+    names_from = Group,
+    values_from = present,
+    values_fill = list(present = FALSE),
+    values_fn = list(present = any))
+
+mpKEGG_RAear_cap <- paste(
+  "Figure 18. KEGG pathway enrichment dotplot of sex-specific transcriptional differences across early RA. Pathways identified via GSEA are",  
+  "displayed with statistical significance on the y-axis, dot size representing gene the logged adjusted p-value. Analysis was performed using clusterProfiler gseKEGG, organism = “hsa”",
+  "Significance thresholds: adjusted p-value < 0.05 and |log2 fold change| > 1 (DESeq2).")
+
+mpKEGG_RAear_wrap <- paste(strwrap(mpKEGG_RAear_cap, width = 100), collapse = "\n")
+
+ggplot(KEGG_RAear_combined, aes(x = Group, y = Description)) +
+  geom_point(aes(size = -log10(p.adjust))) +
+  theme_bw() + labs(caption = mpKEGG_RAear_wrap) + theme(
+    plot.caption = element_text(hjust = 0.5, size = 12))
+
+KEGG_RAear_master_table$Category <- case_when(
+  KEGG_RAear_master_table$Female & KEGG_RAear_master_table$Male & !KEGG_RAear_master_table$Interaction ~ "Shared",
+  KEGG_RAear_master_table$Interaction ~ "Sex-differential",
+  KEGG_RAear_master_table$Female & !KEGG_RAear_master_table$Male ~ "Female-specific",
+  KEGG_RAear_master_table$Male & !KEGG_RAear_master_table$Female ~ "Male-specific",
+  TRUE ~ "Other")
+
+print(KEGG_RAear_master_table, n = 50)
+{
+# 1 Viral protein interaction with cytokine and cytokine receptor 0.00000000206 TRUE   FALSE FALSE       Female-specific
+# 2 Systemic lupus erythematosus                                  0.00000000206 TRUE   FALSE FALSE       Female-specific
+# 3 Type I diabetes mellitus                                      0.00000000206 TRUE   FALSE FALSE       Female-specific
+# 4 Rheumatoid arthritis                                          0.00000000206 TRUE   FALSE FALSE       Female-specific
+# 5 Allograft rejection                                           0.00000000206 TRUE   FALSE FALSE       Female-specific
+# 6 Cytoskeleton in muscle cells                                  0.00000000206 TRUE   FALSE FALSE       Female-specific
+# 7 Hematopoietic cell lineage                                    0.00000000206 TRUE   FALSE FALSE       Female-specific
+# 8 Staphylococcus aureus infection                               0.00000000206 TRUE   FALSE FALSE       Female-specific
+# 9 Neutrophil extracellular trap formation                       0.00000000206 TRUE   FALSE FALSE       Female-specific
+# 10 Cytokine-cytokine receptor interaction                        0.00000000206 TRUE   FALSE FALSE       Female-specific
+# 11 Chemokine signaling pathway                                   0.00000000206 TRUE   FALSE FALSE       Female-specific
+# 12 Cornified envelope formation                                  0.00000000206 TRUE   FALSE FALSE       Female-specific
+# 13 Cardiac muscle contraction                                    0.00000000206 TRUE   FALSE FALSE       Female-specific
+# 14 Ribosome biogenesis in eukaryotes                             0.00000000206 TRUE   FALSE FALSE       Female-specific
+# 15 Hypertrophic cardiomyopathy                                   0.00000000206 TRUE   FALSE FALSE       Female-specific
+# 16 Viral protein interaction with cytokine and cytokine receptor 0.0000000117  FALSE  TRUE  FALSE       Male-specific  
+# 17 Systemic lupus erythematosus                                  0.0000000117  FALSE  TRUE  FALSE       Male-specific  
+# 18 Cornified envelope formation                                  0.0000000117  FALSE  TRUE  FALSE       Male-specific  
+# 19 Cytokine-cytokine receptor interaction                        0.000000457   FALSE  TRUE  FALSE       Male-specific  
+# 20 Neutrophil extracellular trap formation                       0.00000557    FALSE  TRUE  FALSE       Male-specific  
+# 21 Rheumatoid arthritis                                          0.0000116     FALSE  TRUE  FALSE       Male-specific  
+# 22 Staphylococcus aureus infection                               0.0000116     FALSE  TRUE  FALSE       Male-specific  
+# 23 Hematopoietic cell lineage                                    0.0000116     FALSE  TRUE  FALSE       Male-specific  
+# 24 Aminoacyl-tRNA biosynthesis                                   0.0000116     FALSE  TRUE  FALSE       Male-specific  
+# 25 Ribosome biogenesis in eukaryotes                             0.0000933     FALSE  TRUE  FALSE       Male-specific  
+# 26 Chemokine signaling pathway                                   0.0000969     FALSE  TRUE  FALSE       Male-specific  
+# 27 Graft-versus-host disease                                     0.000120      FALSE  TRUE  FALSE       Male-specific  
+# 28 Type I diabetes mellitus                                      0.000127      FALSE  TRUE  FALSE       Male-specific  
+# 29 Allograft rejection                                           0.000182      FALSE  TRUE  FALSE       Male-specific  
+# 30 Hormone signaling                                             0.000377      FALSE  TRUE  FALSE       Male-specific  
+# 31 Cytoskeleton in muscle cells                                  0.00000000493 FALSE  FALSE TRUE        Sex-differenti…
+# 32 Cardiac muscle contraction                                    0.00000000493 FALSE  FALSE TRUE        Sex-differenti…
+# 33 Hypertrophic cardiomyopathy                                   0.00000000493 FALSE  FALSE TRUE        Sex-differenti…
+# 34 Dilated cardiomyopathy                                        0.00000000493 FALSE  FALSE TRUE        Sex-differenti…
+# 35 Motor proteins                                                0.00000000493 FALSE  FALSE TRUE        Sex-differenti…
+# 36 Ribosome                                                      0.00000000493 FALSE  FALSE TRUE        Sex-differenti…
+# 37 Rheumatoid arthritis                                          0.0000000209  FALSE  FALSE TRUE        Sex-differenti…
+# 38 Adrenergic signaling in cardiomyocytes                        0.00000810    FALSE  FALSE TRUE        Sex-differenti…
+# 39 Ribosome biogenesis in eukaryotes                             0.0000153     FALSE  FALSE TRUE        Sex-differenti…
+}
+# GO extraction of female samples
+
+go_RAear_F <- gseGO(
+  geneList = genelist_RAear_F,
+  OrgDb = org.Hs.eg.db,
+  keyType = "ENTREZID",
+  ont = "BP", 
+  pAdjustMethod = "BH",
+  pvalueCutoff = 0.05)
+
+dotplot(go_RAear_F, showCategory = 10) +
+  ggtitle("10 most significant GO enriched Female RAest Pathways")
+
+# GO extraction of male samples
+
+go_RAear_M <- gseGO(
+  geneList = genelist_RAear_M,
+  OrgDb = org.Hs.eg.db,
+  keyType = "ENTREZID",
+  ont = "BP", 
+  pAdjustMethod = "BH",
+  pvalueCutoff = 0.05)
+
+dotplot(go_RAear_M, showCategory = 10) +
+  ggtitle("10 most significant GO enriched male RAear Pathways")
+
+# GO extraction of male and female differences
+
+go_RAear_Mint <- gseGO(
+  geneList = genelist_RAear_Mint,
+  OrgDb = org.Hs.eg.db,
+  keyType = "ENTREZID",
+  ont = "BP", 
+  pAdjustMethod = "BH",
+  pvalueCutoff = 0.05)
+
+dotplot(go_RAear_Mint, showCategory = 10) +
+  ggtitle("10 most significant GO enriched sex-difference RAear Pathways")
+
+# summary GO
+
+GO_RAear_top_F <- go_RAear_F@result[1:15, c("Description", "p.adjust")]
+GO_RAear_top_F$Group <- "Female"
+
+GO_RAear_top_M <- go_RAear_M@result[1:15, c("Description", "p.adjust")]
+GO_RAear_top_M$Group <- "Male"
+
+GO_RAear_top_Mint <- go_RAear_Mint@result[1:15, c("Description", "p.adjust")]
+GO_RAear_top_Mint$Group <- "Interaction"
+
+GO_RAear_combined <- rbind(GO_RAear_top_F, GO_RAear_top_M, GO_RAear_top_Mint)
+
+GO_RAear_master_table <- GO_RAear_combined %>%
+  mutate(present = TRUE) %>%
+  pivot_wider(
+    names_from = Group,
+    values_from = present,
+    values_fill = list(present = FALSE),
+    values_fn = list(present = any))
+
+mpGO_RAear_cap <- paste(
+  "Figure 19. GO pathway enrichment dotplot of sex-specific transcriptional differences across early RA. Pathways identified via GSEA are",  
+  "displayed with statistical significance on the y-axis, dot size representing gene the logged adjusted p-value. Analysis was performed using clusterProfiler gseKEGG, organism = “hsa”",
+  "Significance thresholds: adjusted p-value < 0.05 and |log2 fold change| > 1 (DESeq2).")
+
+mpGO_RAear_wrap <- paste(strwrap(mpGO_RAear_cap, width = 100), collapse = "\n")
+
+ggplot(GO_RAear_combined, aes(x = Group, y = Description)) +
+  geom_point(aes(size = -log10(p.adjust))) +
+  theme_bw() + labs(caption = mpGO_RAear_wrap) + theme(
+    plot.caption = element_text(hjust = 0.8, size = 12))
+
+GO_RAear_master_table$Category <- case_when(
+  GO_RAear_master_table$Female & GO_RAear_master_table$Male & !GO_RAear_master_table$Interaction ~ "Shared",
+  GO_RAear_master_table$Interaction ~ "Sex-differential",
+  GO_RAear_master_table$Female & !GO_RAear_master_table$Male ~ "Female-specific",
+  GO_RAear_master_table$Male & !GO_RAear_master_table$Female ~ "Male-specific",
+  TRUE ~ "Other")
+
+print(GO_RAear_master_table, n = 45)
+{
+# A tibble: 45 × 6
+# Description                                                               p.adjust Female Male  Interaction Category
+# <chr>                                                                        <dbl> <lgl>  <lgl> <lgl>       <chr>   
+#   1 B cell mediated immunity                                                   4.87e-9 TRUE   FALSE FALSE       Female-…
+# 2 immunoglobulin mediated immune response                                    4.87e-9 TRUE   FALSE FALSE       Female-…
+# 3 lymphocyte mediated immunity                                               4.87e-9 TRUE   FALSE FALSE       Female-…
+# 4 leukocyte mediated immunity                                                4.87e-9 TRUE   FALSE FALSE       Female-…
+# 5 adaptive immune response based on somatic recombination of immune recept…  4.87e-9 TRUE   FALSE FALSE       Female-…
+# 6 B cell receptor signaling pathway                                          4.87e-9 TRUE   FALSE FALSE       Female-…
+# 7 antigen receptor-mediated signaling pathway                                4.87e-9 TRUE   FALSE FALSE       Female-…
+# 8 keratinization                                                             4.87e-9 TRUE   FALSE FALSE       Female-…
+# 9 granulocyte chemotaxis                                                     4.87e-9 TRUE   FALSE FALSE       Female-…
+# 10 antimicrobial humoral immune response mediated by antimicrobial peptide    4.87e-9 TRUE   FALSE FALSE       Female-…
+# 11 antimicrobial humoral response                                             4.87e-9 TRUE   FALSE FALSE       Female-…
+# 12 immune response-regulating cell surface receptor signaling pathway         4.87e-9 TRUE   FALSE FALSE       Female-…
+# 13 neutrophil chemotaxis                                                      4.87e-9 TRUE   FALSE FALSE       Female-…
+# 14 humoral immune response                                                    4.87e-9 TRUE   FALSE FALSE       Female-…
+# 15 leukocyte mediated cytotoxicity                                            4.87e-9 TRUE   FALSE FALSE       Female-…
+# 16 immunoglobulin mediated immune response                                    2.90e-8 FALSE  TRUE  FALSE       Male-sp…
+# 17 B cell mediated immunity                                                   2.90e-8 FALSE  TRUE  FALSE       Male-sp…
+# 18 lymphocyte mediated immunity                                               2.90e-8 FALSE  TRUE  FALSE       Male-sp…
+# 19 adaptive immune response based on somatic recombination of immune recept…  2.90e-8 FALSE  TRUE  FALSE       Male-sp…
+# 20 antimicrobial humoral response                                             2.90e-8 FALSE  TRUE  FALSE       Male-sp…
+# 21 leukocyte mediated immunity                                                2.90e-8 FALSE  TRUE  FALSE       Male-sp…
+# 22 antimicrobial humoral immune response mediated by antimicrobial peptide    2.90e-8 FALSE  TRUE  FALSE       Male-sp…
+# 23 keratinization                                                             2.90e-8 FALSE  TRUE  FALSE       Male-sp…
+# 24 humoral immune response                                                    2.90e-8 FALSE  TRUE  FALSE       Male-sp…
+# 25 antibacterial humoral response                                             2.90e-8 FALSE  TRUE  FALSE       Male-sp…
+# 26 B cell receptor signaling pathway                                          2.90e-8 FALSE  TRUE  FALSE       Male-sp…
+# 27 keratinocyte differentiation                                               2.90e-8 FALSE  TRUE  FALSE       Male-sp…
+# 28 killing of cells of another organism                                       2.90e-8 FALSE  TRUE  FALSE       Male-sp…
+# 29 disruption of cell in another organism                                     2.90e-8 FALSE  TRUE  FALSE       Male-sp…
+# 30 cell killing                                                               2.90e-8 FALSE  TRUE  FALSE       Male-sp…
+# 31 myofibril assembly                                                         1.65e-8 FALSE  FALSE TRUE        Sex-dif…
+# 32 muscle tissue morphogenesis                                                1.65e-8 FALSE  FALSE TRUE        Sex-dif…
+# 33 sarcomere organization                                                     1.65e-8 FALSE  FALSE TRUE        Sex-dif…
+# 34 muscle organ morphogenesis                                                 1.65e-8 FALSE  FALSE TRUE        Sex-dif…
+# 35 skeletal muscle contraction                                                1.65e-8 FALSE  FALSE TRUE        Sex-dif…
+# 36 cellular component assembly involved in morphogenesis                      1.65e-8 FALSE  FALSE TRUE        Sex-dif…
+# 37 cellular anatomical entity morphogenesis                                   1.65e-8 FALSE  FALSE TRUE        Sex-dif…
+# 38 striated muscle cell development                                           1.65e-8 FALSE  FALSE TRUE        Sex-dif…
+# 39 cardiac muscle tissue morphogenesis                                        1.65e-8 FALSE  FALSE TRUE        Sex-dif…
+}
+
+
+# starting with 3 most significant and relevant to RA pathways (which were 
+# chosen based off of their p-adjusted value, gene contribution, relevancy 
+# to RA pathology and peripheral presence, and relevancy to the sex-differences
+# in transcriptomics -> pathway only shows up in interaction and one of the 
+# sexes, not both.), then doing 3 from male and female KEGG extraction
+
+{
+  # Ribosome pathway extraction and processing in interactions group
+  gse_RAear_Mint_Ribo_genes <- extract_genes_from_pathway(gse_RAear_Mint, "Ribosome")
+  
+  gse_RAear_Mint_Ribo_valid_genes <- intersect(gse_RAear_Mint_Ribo_genes, rownames(res_RAear_Mint))  
+  
+  gse_RAear_Mint_Ribo_df <- data.frame(gene = gse_RAear_Mint_Ribo_genes,
+                                           log2FC = res_RAear_Mint[gse_RAear_Mint_Ribo_genes, "log2FoldChange"],
+                                           padj = res_RAear_Mint[gse_RAear_Mint_Ribo_genes, "padj"])
+  
+  gse_RAear_Mint_Ribo_dffilt <- gse_RAear_Mint_Ribo_df %>%
+    filter(!is.na(padj)) %>%
+    filter(padj < 0.05) %>%
+    arrange(-abs(log2FC)) %>%
+    head(10)
+  
+  gse_RAear_Mint_Ribo_dffilt <- gse_RAear_Mint_Ribo_dffilt %>%
+    mutate(
+      pathway = "Ribosome",
+      group = "Interaction")
+  
+  # Dilated cardiomyopathy pathway extraction and processing in interactions group
+  gse_RAear_Mint_DilCar_genes <- extract_genes_from_pathway(gse_RAear_Mint, "Dilated cardiomyopathy")
+  
+  gse_RAear_Mint_DilCar_valid_genes <- intersect(gse_RAear_Mint_DilCar_genes, rownames(res_RAear_Mint))  
+  
+  gse_RAear_Mint_DilCar_df <- data.frame(gene = gse_RAear_Mint_DilCar_genes,
+                                       log2FC = res_RAear_Mint[gse_RAear_Mint_DilCar_genes, "log2FoldChange"],
+                                       padj = res_RAear_Mint[gse_RAear_Mint_DilCar_genes, "padj"])
+  
+  gse_RAear_Mint_DilCar_dffilt <- gse_RAear_Mint_DilCar_df %>%
+    filter(!is.na(padj)) %>%
+    filter(padj < 0.05) %>%
+    arrange(-abs(log2FC)) %>%
+    head(10)
+  
+  gse_RAear_Mint_DilCar_dffilt <- gse_RAear_Mint_DilCar_dffilt %>%
+    mutate(
+      pathway = "Dilated cardiomyopathy",
+      group = "Interaction")
+  
+  # Autoimmune thyroid disease pathway extraction and processing in interactions group 
+  gse_RAear_Mint_ThyDis_genes <- extract_genes_from_pathway(gse_RAear_Mint, "Autoimmune thyroid disease")
+  
+  gse_RAear_Mint_ThyDis_valid_genes <- intersect(gse_RAear_Mint_ThyDis_genes, rownames(res_RAear_Mint))  
+  
+  gse_RAear_Mint_ThyDis_df <- data.frame(gene = gse_RAear_Mint_ThyDis_genes,
+                                         log2FC = res_RAear_Mint[gse_RAear_Mint_ThyDis_genes, "log2FoldChange"],
+                                         padj = res_RAear_Mint[gse_RAear_Mint_ThyDis_genes, "padj"])
+  
+  gse_RAear_Mint_ThyDis_dffilt <- gse_RAear_Mint_ThyDis_df %>%
+    filter(!is.na(padj)) %>%
+    filter(padj < 0.05) %>%
+    arrange(-abs(log2FC)) %>%
+    head(10)
+  
+  gse_RAear_Mint_ThyDis_dffilt <- gse_RAear_Mint_ThyDis_dffilt %>%
+    mutate(
+      pathway = "Autoimmune thyroid disease",
+      group = "Interaction")
+  
+  # now doing extracting and processing on male and female groups
+  # Cornified envelope formation pathway extraction and processing because its 
+  # shared
+  gse_RAear_F_CorEnv_genes <- extract_genes_from_pathway(gse_RAear_F, "Cornified envelope formation")
+  
+  gse_RAear_F_CorEnv_valid_genes <- intersect(gse_RAear_F_CorEnv_genes, rownames(res_RAear_F))  
+  
+  gse_RAear_F_CorEnv_df <- data.frame(gene = gse_RAear_F_CorEnv_genes,
+                                         log2FC = res_RAear_F[gse_RAear_F_CorEnv_genes, "log2FoldChange"],
+                                         padj = res_RAear_F[gse_RAear_F_CorEnv_genes, "padj"])
+  
+  gse_RAear_F_CorEnv_dffilt <- gse_RAear_F_CorEnv_df %>%
+    filter(!is.na(padj)) %>%
+    filter(padj < 0.05) %>%
+    arrange(-abs(log2FC)) %>%
+    head(10)
+  
+  gse_RAear_F_CorEnv_dffilt <- gse_RAear_F_CorEnv_dffilt %>%
+    mutate(
+      pathway = "Cornified envelope formation",
+      group = "Female")
+  
+  # Cytoskeleton in muscle cells pathway extraction and processing in female group
+  gse_RAear_F_CytMus_genes <- extract_genes_from_pathway(gse_RAear_F, "Cytoskeleton in muscle cells")
+  
+  gse_RAear_F_CytMus_valid_genes <- intersect(gse_RAear_F_CytMus_genes, rownames(res_RAear_F))  
+  
+  gse_RAear_F_CytMus_df <- data.frame(gene = gse_RAear_F_CytMus_genes,
+                                      log2FC = res_RAear_F[gse_RAear_F_CytMus_genes, "log2FoldChange"],
+                                      padj = res_RAear_F[gse_RAear_F_CytMus_genes, "padj"])
+  
+  gse_RAear_F_CytMus_dffilt <- gse_RAear_F_CytMus_df %>%
+    filter(!is.na(padj)) %>%
+    filter(padj < 0.05) %>%
+    arrange(-abs(log2FC)) %>%
+    head(10)
+  
+  gse_RAear_F_CytMus_dffilt <- gse_RAear_F_CytMus_dffilt %>%
+    mutate(
+      pathway = "Cytoskeleton in muscle cells",
+      group = "Female")
+  
+  # Allograft rejection pathway extraction and processing in female group
+  gse_RAear_F_Allo_genes <- extract_genes_from_pathway(gse_RAear_F, "Allograft rejection")
+  
+  gse_RAear_F_Allo_valid_genes <- intersect(gse_RAear_F_Allo_genes, rownames(res_RAear_F))  
+  
+  gse_RAear_F_Allo_df <- data.frame(gene = gse_RAear_F_Allo_genes,
+                                    log2FC = res_RAear_F[gse_RAear_F_Allo_genes, "log2FoldChange"],
+                                    padj = res_RAear_F[gse_RAear_F_Allo_genes, "padj"])
+  
+  gse_RAear_F_Allo_dffilt <- gse_RAear_F_Allo_df %>%
+    filter(!is.na(padj)) %>%
+    filter(padj < 0.05) %>%
+    arrange(-abs(log2FC)) %>%
+    head(10)
+  
+  gse_RAear_F_Allo_dffilt <- gse_RAear_F_Allo_dffilt %>%
+    mutate(
+      pathway = "Allograft rejection",
+      group = "Female")
+  
+  # Male Cornified envelope formation pathway extraction and processing because its shared
+  gse_RAear_M_CorEnv_genes <- extract_genes_from_pathway(gse_RAear_M, "Cornified envelope formation")
+  
+  gse_RAear_M_CorEnv_valid_genes <- intersect(gse_RAear_M_CorEnv_genes, rownames(res_RAear_M))  
+  
+  gse_RAear_M_CorEnv_df <- data.frame(gene = gse_RAear_M_CorEnv_genes,
+                                      log2FC = res_RAear_M[gse_RAear_M_CorEnv_genes, "log2FoldChange"],
+                                      padj = res_RAear_M[gse_RAear_M_CorEnv_genes, "padj"])
+  
+  gse_RAear_M_CorEnv_dffilt <- gse_RAear_M_CorEnv_df %>%
+    filter(!is.na(padj)) %>%
+    filter(padj < 0.05) %>%
+    arrange(-abs(log2FC)) %>%
+    head(10)
+  
+  gse_RAear_M_CorEnv_dffilt <- gse_RAear_M_CorEnv_dffilt %>%
+    mutate(
+      pathway = "Cornified envelope formation",
+      group = "Male")
+  
+  # Male Graft-versus-host disease pathway extraction and processing
+  gse_RAear_M_GvHDis_genes <- extract_genes_from_pathway(gse_RAear_M, "Graft-versus-host disease")
+  
+  gse_RAear_M_GvHDis_valid_genes <- intersect(gse_RAear_M_GvHDis_genes, rownames(res_RAear_M))  
+  
+  gse_RAear_M_GvHDis_df <- data.frame(gene = gse_RAear_M_GvHDis_genes,
+                                      log2FC = res_RAear_M[gse_RAear_M_GvHDis_genes, "log2FoldChange"],
+                                      padj = res_RAear_M[gse_RAear_M_GvHDis_genes, "padj"])
+  
+  gse_RAear_M_GvHDis_dffilt <- gse_RAear_M_GvHDis_df %>%
+    filter(!is.na(padj)) %>%
+    filter(padj < 0.05) %>%
+    arrange(-abs(log2FC)) %>%
+    head(10)
+  
+  gse_RAear_M_GvHDis_dffilt <- gse_RAear_M_GvHDis_dffilt %>%
+    mutate(
+      pathway = "Graft-versus-host disease",
+      group = "Male")
+  
+  # Male Porphyrin metabolism pathway extraction and processing
+  gse_RAear_M_tRANSynth_genes <- extract_genes_from_pathway(gse_RAear_M, "Aminoacyl-tRNA biosynthesis")
+  
+  gse_RAear_M_tRANSynth_valid_genes <- intersect(gse_RAear_M_tRANSynth_genes, rownames(res_RAear_M))  
+  
+  gse_RAear_M_tRANSynth_df <- data.frame(gene = gse_RAear_M_tRANSynth_genes,
+                                      log2FC = res_RAear_M[gse_RAear_M_tRANSynth_genes, "log2FoldChange"],
+                                      padj = res_RAear_M[gse_RAear_M_tRANSynth_genes, "padj"])
+  
+  gse_RAear_M_tRANSynth_dffilt <- gse_RAear_M_tRANSynth_df %>%
+    filter(!is.na(padj)) %>%
+    filter(padj < 0.05) %>%
+    arrange(-abs(log2FC)) %>%
+    head(10)
+  
+  gse_RAear_M_tRANSynth_dffilt <- gse_RAear_M_tRANSynth_dffilt %>%
+    mutate(
+      pathway = "Aminoacyl-tRNA biosynthesis",
+      group = "Male")
+}
+
+#
+#
+#
+# now doing GO extraction
+#
+#
+#
+
+{
+  # starting with sex-interaction, doing 3 of sex-int, 2 of female, 2 of male.
+  # detection of chemical stimulus involved in sensory perception of smell
+  # pathway extraction and processing in interactions group
+  go_RAear_Mint_SarOrg_genes <- extract_genes_from_pathway(go_RAear_Mint, "sarcomere organization")
+  
+  go_RAear_Mint_SarOrg_valid_genes <- intersect(go_RAear_Mint_SarOrg_genes, rownames(res_RAear_Mint))  
+  
+  go_RAear_Mint_SarOrg_df <- data.frame(gene = go_RAear_Mint_SarOrg_genes,
+                                       log2FC = res_RAear_Mint[go_RAear_Mint_SarOrg_genes, "log2FoldChange"],
+                                       padj = res_RAear_Mint[go_RAear_Mint_SarOrg_genes, "padj"])
+  
+  go_RAear_Mint_SarOrg_dffilt <- go_RAear_Mint_SarOrg_df %>%
+    filter(!is.na(padj)) %>%
+    filter(padj < 0.05) %>%
+    arrange(-abs(log2FC)) %>%
+    head(10)
+  
+  go_RAear_Mint_SarOrg_dffilt <- go_RAear_Mint_SarOrg_dffilt %>%
+    mutate(
+      pathway = "sarcomere organization",
+      group = "Interaction")
+  
+  # cellular component assembly involved in morphogenesis pathway extraction 
+  # and processing in interactions group
+  go_RAest_Mint_CellMorph_genes <- extract_genes_from_pathway(go_RAest_Mint, "cellular component assembly involved in morphogenesis")
+  
+  go_RAest_Mint_CellMorph_valid_genes <- intersect(go_RAest_Mint_CellMorph_genes, rownames(res_RAest_Mint))  
+  
+  go_RAest_Mint_CellMorph_df <- data.frame(gene = go_RAest_Mint_CellMorph_genes,
+                                         log2FC = res_RAest_Mint[go_RAest_Mint_CellMorph_genes, "log2FoldChange"],
+                                         padj = res_RAest_Mint[go_RAest_Mint_CellMorph_genes, "padj"])
+  
+  go_RAest_Mint_CellMorph_dffilt <- go_RAest_Mint_CellMorph_df %>%
+    filter(!is.na(padj)) %>%
+    filter(padj < 0.05) %>%
+    arrange(-abs(log2FC)) %>%
+    head(10)
+  
+  go_RAest_Mint_CellMorph_dffilt <- go_RAest_Mint_CellMorph_dffilt %>%
+    mutate(
+      pathway = "cellular component assembly involved in morphogenesis",
+      group = "Interaction")
+  
+  # now doing extracting and processing on male and female groups
+  # immunoglobulin mediated immune response pathway extraction and processing 
+  # because its shared
+  go_RAear_F_ImmuGlob_genes <- extract_genes_from_pathway(go_RAear_F, "immunoglobulin mediated immune response")
+  
+  go_RAear_F_ImmuGlob_valid_genes <- intersect(go_RAear_F_ImmuGlob_genes, rownames(res_RAear_F))  
+  
+  go_RAear_F_ImmuGlob_df <- data.frame(gene = go_RAear_F_ImmuGlob_genes,
+                                       log2FC = res_RAear_F[go_RAear_F_ImmuGlob_genes, "log2FoldChange"],
+                                       padj = res_RAear_F[go_RAear_F_ImmuGlob_genes, "padj"])
+  
+  go_RAear_F_ImmuGlob_dffilt <- go_RAear_F_ImmuGlob_df %>%
+    filter(!is.na(padj)) %>%
+    filter(padj < 0.05) %>%
+    arrange(-abs(log2FC)) %>%
+    head(10)
+  
+  go_RAear_F_ImmuGlob_dffilt <- go_RAear_F_ImmuGlob_dffilt %>%
+    mutate(
+      pathway = "immunoglobulin mediated immune response",
+      group = "Female")
+  
+  # B cell receptor signaling pathway pathway extraction and processing in female group
+  go_RAear_F_BCellSig_genes <- extract_genes_from_pathway(go_RAear_F, "B cell receptor signaling pathway")
+  
+  go_RAear_F_BCellSig_valid_genes <- intersect(go_RAear_F_BCellSig_genes, rownames(res_RAear_F))  
+  
+  go_RAear_F_BCellSig_df <- data.frame(gene = go_RAear_F_BCellSig_genes,
+                                   log2FC = res_RAear_F[go_RAear_F_BCellSig_genes, "log2FoldChange"],
+                                   padj = res_RAear_F[go_RAear_F_BCellSig_genes, "padj"])
+  
+  go_RAear_F_BCellSig_dffilt <- go_RAear_F_BCellSig_df %>%
+    filter(!is.na(padj)) %>%
+    filter(padj < 0.05) %>%
+    arrange(-abs(log2FC)) %>%
+    head(10)
+  
+  go_RAear_F_BCellSig_dffilt <- go_RAear_F_BCellSig_dffilt %>%
+    mutate(
+      pathway = "B cell receptor signaling pathway",
+      group = "Female")
+  
+  # Male immunoglobulin mediated immune response pathway extraction and processing
+  go_RAear_M_ImmuGlob_genes <- extract_genes_from_pathway(go_RAear_M, "immunoglobulin mediated immune response")
+  
+  go_RAear_M_ImmuGlob_valid_genes <- intersect(go_RAear_M_ImmuGlob_genes, rownames(res_RAear_M))  
+  
+  go_RAear_M_ImmuGlob_df <- data.frame(gene = go_RAear_M_ImmuGlob_genes,
+                                       log2FC = res_RAear_M[go_RAear_M_ImmuGlob_genes, "log2FoldChange"],
+                                       padj = res_RAear_M[go_RAear_M_ImmuGlob_genes, "padj"])
+  
+  go_RAear_M_ImmuGlob_dffilt <- go_RAear_M_ImmuGlob_df %>%
+    filter(!is.na(padj)) %>%
+    filter(padj < 0.05) %>%
+    arrange(-abs(log2FC)) %>%
+    head(10)
+  
+  go_RAear_M_ImmuGlob_dffilt <- go_RAear_M_ImmuGlob_dffilt %>%
+    mutate(
+      pathway = "immunoglobulin mediated immune response",
+      group = "Male")
+  
+# Male epidermis development pathway extraction 
+  go_RAear_M_EpiDev_genes <- extract_genes_from_pathway(go_RAear_M, "epidermis development")
+  
+  go_RAear_M_EpiDev_valid_genes <- intersect(go_RAear_M_EpiDev_genes, rownames(res_RAear_M))  
+  
+  go_RAear_M_EpiDev_df <- data.frame(gene = go_RAear_M_EpiDev_genes,
+                                       log2FC = res_RAear_M[go_RAear_M_EpiDev_genes, "log2FoldChange"],
+                                       padj = res_RAest_M[go_RAear_M_EpiDev_genes, "padj"])
+  
+  go_RAear_M_EpiDev_dffilt <- go_RAear_M_EpiDev_df %>%
+    filter(!is.na(padj)) %>%
+    filter(padj < 0.05) %>%
+    arrange(-abs(log2FC)) %>%
+    head(10)
+  
+  go_RAear_M_EpiDev_dffilt <- go_RAear_M_EpiDev_dffilt %>%
+    mutate(
+      pathway = "epidermis development",
+      group = "Male")
+}
+
+#
+#
+#
+# now doing making master dataframe of all RAest extracted genes.
+#
+#
+#
+
+RAear_master_genes <- bind_rows(gse_RAear_Mint_ThyDis_dffilt, 
+                                gse_RAear_Mint_DilCar_dffilt, 
+                                gse_RAear_Mint_Ribo_dffilt, 
+                                gse_RAear_F_CorEnv_dffilt, 
+                                gse_RAear_F_CytMus_dffilt, 
+                                gse_RAear_F_Allo_dffilt, 
+                                gse_RAear_M_CorEnv_dffilt, 
+                                gse_RAear_M_GvHDis_dffilt, 
+                                gse_RAear_M_tRANSynth_dffilt, 
+                                go_RAear_Mint_SarOrg_dffilt, 
+                                go_RAest_Mint_CellMorph_dffilt, 
+                                go_RAear_F_ImmuGlob_dffilt, 
+                                go_RAear_F_BCellSig_dffilt, 
+                                go_RAear_M_ImmuGlob_dffilt, 
+                                go_RAear_M_EpiDev_dffilt)
+
+RAear_master_genes$symbol <- mapIds(
+  org.Hs.eg.db,
+  keys = RAear_master_genes$gene,
+  column = "SYMBOL",
+  keytype = "ENTREZID",
+  multiVals = "first")
+
+RAear_master_genes
+
+# table looks good, saving it.
+write.table(
+  RAear_master_genes,
+  "RAear_master_genes.tsv",
+  sep = "\t",
+  row.names = FALSE,
+  quote = FALSE)
+
+
+# OA KEGG enrichment and extraction ---------------------------------------
+
+# KEGG extraction of female samples
+
+gse_OA_F <- gseKEGG(geneList = genelist_OA_F, organism = "hsa")
+
+dotplot(gse_OA_F, showCategory = 10) +
+  ggtitle("KEGG enriched Female OA Pathways")
+
+# KEGG extraction of male samples
+
+gse_OA_M <- gseKEGG(geneList = genelist_OA_M, organism = "hsa")
+
+dotplot(gse_OA_M, showCategory = 10) +
+  ggtitle("KEGG enriched Male OA Pathways")
+
+# KEGG extraction of male and female differences
+
+gse_OA_Mint <- gseKEGG(geneList = genelist_OA_Mint, organism = "hsa")
+
+dotplot(gse_OA_Mint, showCategory = 10) +
+  ggtitle("KEGG enriched Sex interaction in OA Pathways")
+
+# summary KEGG
+
+KEGG_OA_top_F <- gse_OA_F@result[1:15, c("Description", "p.adjust")]
+KEGG_OA_top_F$Group <- "Female"
+
+KEGG_OA_top_M <- gse_OA_M@result[1:15, c("Description", "p.adjust")]
+KEGG_OA_top_M$Group <- "Male"
+
+KEGG_OA_top_Mint <- gse_OA_Mint@result[1:15, c("Description", "p.adjust")]
+KEGG_OA_top_Mint$Group <- "Interaction"
+
+KEGG_OA_combined <- rbind(KEGG_OA_top_F, KEGG_OA_top_M, KEGG_OA_top_Mint)
+
+KEGG_OA_master_table <- KEGG_OA_combined %>%
+  mutate(present = TRUE) %>%
+  pivot_wider(
+    names_from = Group,
+    values_from = present,
+    values_fill = list(present = FALSE),
+    values_fn = list(present = any))
+
+mpKEGG_OA_cap <- paste(
+  "Figure 23. KEGG pathway enrichment dotplot of sex-specific transcriptional differences across Osteoarthritis. Pathways identified via GSEA are",  
+  "displayed with statistical significance on the y-axis, dot size representing gene the logged adjusted p-value. Analysis was performed using clusterProfiler gseKEGG, organism = “hsa”",
+  "Significance thresholds: adjusted p-value < 0.05 and |log2 fold change| > 1 (DESeq2).")
+
+mpKEGG_OA_wrap <- paste(strwrap(mpKEGG_OA_cap, width = 100), collapse = "\n")
+
+ggplot(KEGG_OA_combined, aes(x = Group, y = Description)) +
+  geom_point(aes(size = -log10(p.adjust))) +
+  theme_bw() + labs(caption = mpKEGG_OA_wrap) + theme(
+    plot.caption = element_text(hjust = 0.5, size = 12))
+
+KEGG_OA_master_table$Category <- case_when(
+  KEGG_OA_master_table$Female & KEGG_OA_master_table$Male & !KEGG_OA_master_table$Interaction ~ "Shared",
+  KEGG_OA_master_table$Interaction ~ "Sex-differential",
+  KEGG_OA_master_table$Female & !KEGG_OA_master_table$Male ~ "Female-specific",
+  KEGG_OA_master_table$Male & !KEGG_OA_master_table$Female ~ "Male-specific",
+  TRUE ~ "Other")
+
+print(KEGG_OA_master_table, n = 39)
+{
+# # A tibble: 45 × 6
+# Description                                                        p.adjust Female Male  Interaction Category       
+# <chr>                                                                 <dbl> <lgl>  <lgl> <lgl>       <chr>          
+#   1 Rheumatoid arthritis                                          0.0000000102  TRUE   FALSE FALSE       Female-specific
+# 2 Viral protein interaction with cytokine and cytokine receptor 0.0000000102  TRUE   FALSE FALSE       Female-specific
+# 3 Cytoskeleton in muscle cells                                  0.0000000102  TRUE   FALSE FALSE       Female-specific
+# 4 Toll-like receptor signaling pathway                          0.0000000234  TRUE   FALSE FALSE       Female-specific
+# 5 Cardiac muscle contraction                                    0.0000000234  TRUE   FALSE FALSE       Female-specific
+# 6 Motor proteins                                                0.0000000274  TRUE   FALSE FALSE       Female-specific
+# 7 Leishmaniasis                                                 0.0000000654  TRUE   FALSE FALSE       Female-specific
+# 8 Adrenergic signaling in cardiomyocytes                        0.0000000883  TRUE   FALSE FALSE       Female-specific
+# 9 Hypertrophic cardiomyopathy                                   0.000000122   TRUE   FALSE FALSE       Female-specific
+# 10 Intestinal immune network for IgA production                  0.000000138   TRUE   FALSE FALSE       Female-specific
+# 11 Ribosome biogenesis in eukaryotes                             0.000000220   TRUE   FALSE FALSE       Female-specific
+# 12 TNF signaling pathway                                         0.000000525   TRUE   FALSE FALSE       Female-specific
+# 13 NF-kappa B signaling pathway                                  0.000000682   TRUE   FALSE FALSE       Female-specific
+# 14 Dilated cardiomyopathy                                        0.00000119    TRUE   FALSE FALSE       Female-specific
+# 15 Allograft rejection                                           0.00000125    TRUE   FALSE FALSE       Female-specific
+# 16 Cytoskeleton in muscle cells                                  0.0000000117  FALSE  TRUE  FALSE       Male-specific  
+# 17 Motor proteins                                                0.0000000117  FALSE  TRUE  FALSE       Male-specific  
+# 18 Hypertrophic cardiomyopathy                                   0.0000000117  FALSE  TRUE  FALSE       Male-specific  
+# 19 Dilated cardiomyopathy                                        0.0000000382  FALSE  TRUE  FALSE       Male-specific  
+# 20 Cardiac muscle contraction                                    0.0000000382  FALSE  TRUE  FALSE       Male-specific  
+# 21 Cornified envelope formation                                  0.00000108    FALSE  TRUE  FALSE       Male-specific  
+# 22 Lysosome                                                      0.0000444     FALSE  TRUE  FALSE       Male-specific  
+# 23 Arrhythmogenic right ventricular cardiomyopathy               0.000139      FALSE  TRUE  FALSE       Male-specific  
+# 24 Adrenergic signaling in cardiomyocytes                        0.000139      FALSE  TRUE  FALSE       Male-specific  
+# 25 Viral myocarditis                                             0.00323       FALSE  TRUE  FALSE       Male-specific  
+# 26 Systemic lupus erythematosus                                  0.00431       FALSE  TRUE  FALSE       Male-specific  
+# 27 Legionellosis                                                 0.00495       FALSE  TRUE  FALSE       Male-specific  
+# 28 Calcium signaling pathway                                     0.0130        FALSE  TRUE  FALSE       Male-specific  
+# 29 Phagosome                                                     0.0201        FALSE  TRUE  FALSE       Male-specific  
+# 30 Leishmaniasis                                                 0.0371        FALSE  TRUE  FALSE       Male-specific  
+# 31 Cytoskeleton in muscle cells                                  0.00000000852 FALSE  FALSE TRUE        Sex-differenti…
+# 32 Hypertrophic cardiomyopathy                                   0.00000000852 FALSE  FALSE TRUE        Sex-differenti…
+# 33 Dilated cardiomyopathy                                        0.00000000852 FALSE  FALSE TRUE        Sex-differenti…
+# 34 Motor proteins                                                0.00000000852 FALSE  FALSE TRUE        Sex-differenti…
+# 35 Cardiac muscle contraction                                    0.0000000999  FALSE  FALSE TRUE        Sex-differenti…
+# 36 Adrenergic signaling in cardiomyocytes                        0.0000000999  FALSE  FALSE TRUE        Sex-differenti…
+# 37 Viral protein interaction with cytokine and cytokine receptor 0.00000717    FALSE  FALSE TRUE        Sex-differenti…
+# 38 Chemokine signaling pathway                                   0.00000788    FALSE  FALSE TRUE        Sex-differenti…
+# 39 Arrhythmogenic right ventricular cardiomyopathy               0.0000124     FALSE  FALSE TRUE        Sex-differenti…
+}
+# GO extraction of female samples
+
+go_OA_F <- gseGO(
+  geneList = genelist_OA_F,
+  OrgDb = org.Hs.eg.db,
+  keyType = "ENTREZID",
+  ont = "BP", 
+  pAdjustMethod = "BH",
+  pvalueCutoff = 0.05)
+
+dotplot(go_OA_F, showCategory = 10) +
+  ggtitle("10 most significant GO enriched Female OA Pathways")
+
+# GO extraction of male samples
+
+go_OA_M <- gseGO(
+  geneList = genelist_OA_M,
+  OrgDb = org.Hs.eg.db,
+  keyType = "ENTREZID",
+  ont = "BP", 
+  pAdjustMethod = "BH",
+  pvalueCutoff = 0.05)
+
+dotplot(go_OA_M, showCategory = 10) +
+  ggtitle("10 most significant GO enriched male OA Pathways")
+
+# GO extraction of male and female differences
+
+go_OA_Mint <- gseGO(
+  geneList = genelist_OA_Mint,
+  OrgDb = org.Hs.eg.db,
+  keyType = "ENTREZID",
+  ont = "BP", 
+  pAdjustMethod = "BH",
+  pvalueCutoff = 0.05)
+
+dotplot(go_OA_Mint, showCategory = 10) +
+  ggtitle("10 most significant GO enriched sex-difference OA Pathways")
+
+# summary GO
+
+GO_OA_top_F <- go_OA_F@result[1:15, c("Description", "p.adjust")]
+GO_OA_top_F$Group <- "Female"
+
+GO_OA_top_M <- go_OA_M@result[1:15, c("Description", "p.adjust")]
+GO_OA_top_M$Group <- "Male"
+
+GO_OA_top_Mint <- go_OA_Mint@result[1:15, c("Description", "p.adjust")]
+GO_OA_top_Mint$Group <- "Interaction"
+
+GO_OA_combined <- rbind(GO_OA_top_F, GO_OA_top_M, GO_OA_top_Mint)
+
+GO_OA_master_table <- GO_OA_combined %>%
+  mutate(present = TRUE) %>%
+  pivot_wider(
+    names_from = Group,
+    values_from = present,
+    values_fill = list(present = FALSE),
+    values_fn = list(present = any))
+
+mpGO_OA_cap <- paste(
+  "Figure 24. GO pathway enrichment dotplot of sex-specific transcriptional differences across Osteoarthritis . Pathways identified via GSEA are",  
+  "displayed with statistical significance on the y-axis, dot size representing gene the logged adjusted p-value. Analysis was performed using clusterProfiler gseKEGG, organism = “hsa”",
+  "Significance thresholds: adjusted p-value < 0.05 and |log2 fold change| > 1 (DESeq2).")
+
+mpGO_OA_wrap <- paste(strwrap(mpGO_OA_cap, width = 100), collapse = "\n")
+
+ggplot(GO_OA_combined, aes(x = Group, y = Description)) +
+  geom_point(aes(size = -log10(p.adjust))) +
+  theme_bw() + labs(caption = mpGO_OA_wrap) + theme(
+    plot.caption = element_text(hjust = 0.8, size = 12))
+
+GO_OA_master_table$Category <- case_when(
+  GO_OA_master_table$Female & GO_OA_master_table$Male & !GO_OA_master_table$Interaction ~ "Shared",
+  GO_OA_master_table$Interaction ~ "Sex-differential",
+  GO_OA_master_table$Female & !GO_OA_master_table$Male ~ "Female-specific",
+  GO_OA_master_table$Male & !GO_OA_master_table$Female ~ "Male-specific",
+  TRUE ~ "Other")
+
+print(GO_OA_master_table, n = 45)
+{
+# A tibble: 45 × 6
+# Description                                                               p.adjust Female Male  Interaction Category
+# <chr>                                                                        <dbl> <lgl>  <lgl> <lgl>       <chr>   
+#   1 antigen processing and presentation of exogenous peptide antigen via MHC…  1.38e-8 TRUE   FALSE FALSE       Female-…
+# 2 antigen processing and presentation of peptide or polysaccharide antigen…  1.38e-8 TRUE   FALSE FALSE       Female-…
+# 3 antigen processing and presentation of peptide antigen via MHC class II    1.38e-8 TRUE   FALSE FALSE       Female-…
+# 4 B cell receptor signaling pathway                                          1.38e-8 TRUE   FALSE FALSE       Female-…
+# 5 antigen processing and presentation of exogenous peptide antigen           1.38e-8 TRUE   FALSE FALSE       Female-…
+# 6 antigen processing and presentation of exogenous antigen                   1.38e-8 TRUE   FALSE FALSE       Female-…
+# 7 myofibril assembly                                                         1.38e-8 TRUE   FALSE FALSE       Female-…
+# 8 sarcomere organization                                                     1.38e-8 TRUE   FALSE FALSE       Female-…
+# 9 musculoskeletal movement                                                   1.38e-8 TRUE   FALSE FALSE       Female-…
+# 10 skeletal muscle contraction                                                1.38e-8 TRUE   FALSE FALSE       Female-…
+# 11 multicellular organismal movement                                          1.38e-8 TRUE   FALSE FALSE       Female-…
+# 12 myotube cell development                                                   1.38e-8 TRUE   FALSE FALSE       Female-…
+# 13 regulation of myotube differentiation                                      1.38e-8 TRUE   FALSE FALSE       Female-…
+# 14 striated muscle cell development                                           1.38e-8 TRUE   FALSE FALSE       Female-…
+# 15 cellular component assembly involved in morphogenesis                      1.38e-8 TRUE   FALSE FALSE       Female-…
+# 16 striated muscle cell development                                           1.48e-8 FALSE  TRUE  FALSE       Male-sp…
+# 17 myofibril assembly                                                         1.48e-8 FALSE  TRUE  FALSE       Male-sp…
+# 18 muscle cell development                                                    1.48e-8 FALSE  TRUE  FALSE       Male-sp…
+# 19 striated muscle contraction                                                1.48e-8 FALSE  TRUE  FALSE       Male-sp…
+# 20 musculoskeletal movement                                                   1.48e-8 FALSE  TRUE  FALSE       Male-sp…
+# 21 sarcomere organization                                                     1.48e-8 FALSE  TRUE  FALSE       Male-sp…
+# 22 skeletal muscle contraction                                                1.48e-8 FALSE  TRUE  FALSE       Male-sp…
+# 23 cellular component assembly involved in morphogenesis                      1.48e-8 FALSE  TRUE  FALSE       Male-sp…
+# 24 cellular anatomical entity morphogenesis                                   1.48e-8 FALSE  TRUE  FALSE       Male-sp…
+# 25 multicellular organismal movement                                          1.48e-8 FALSE  TRUE  FALSE       Male-sp…
+# 26 actomyosin structure organization                                          1.48e-8 FALSE  TRUE  FALSE       Male-sp…
+# 27 muscle contraction                                                         1.48e-8 FALSE  TRUE  FALSE       Male-sp…
+# 28 striated muscle cell differentiation                                       1.48e-8 FALSE  TRUE  FALSE       Male-sp…
+# 29 muscle organ morphogenesis                                                 1.48e-8 FALSE  TRUE  FALSE       Male-sp…
+# 30 muscle system process                                                      1.48e-8 FALSE  TRUE  FALSE       Male-sp…
+# 31 myofibril assembly                                                         1.59e-8 FALSE  FALSE TRUE        Sex-dif…
+# 32 musculoskeletal movement                                                   1.59e-8 FALSE  FALSE TRUE        Sex-dif…
+# 33 striated muscle cell development                                           1.59e-8 FALSE  FALSE TRUE        Sex-dif…
+# 34 skeletal muscle contraction                                                1.59e-8 FALSE  FALSE TRUE        Sex-dif…
+# 35 multicellular organismal movement                                          1.59e-8 FALSE  FALSE TRUE        Sex-dif…
+# 36 cellular component assembly involved in morphogenesis                      1.59e-8 FALSE  FALSE TRUE        Sex-dif…
+# 37 cellular anatomical entity morphogenesis                                   1.59e-8 FALSE  FALSE TRUE        Sex-dif…
+# 38 sarcomere organization                                                     1.59e-8 FALSE  FALSE TRUE        Sex-dif…
+# 39 muscle cell development                                                    1.59e-8 FALSE  FALSE TRUE        Sex-dif…
+}
+
+# starting with 3 most significant and relevant to RA pathways (which were 
+# chosen based off of their p-adjusted value, gene contribution, relevancy 
+# to RA pathology and peripheral presence, and relevancy to the sex-differences
+# in transcriptomics -> pathway only shows up in interaction and one of the 
+# sexes, not both.), then doing 3 from male and female KEGG extraction
+
+{
+  # Chemokine signaling pathway pathway extraction and processing in interactions group
+  gse_OA_Mint_ChemSig_genes <- extract_genes_from_pathway(gse_OA_Mint, "Chemokine signaling pathway")
+  
+  gse_OA_Mint_ChemSig_valid_genes <- intersect(gse_OA_Mint_ChemSig_genes, rownames(res_OA_Mint))  
+  
+  gse_OA_Mint_ChemSig_df <- data.frame(gene = gse_OA_Mint_ChemSig_genes,
+                                       log2FC = res_OA_Mint[gse_OA_Mint_ChemSig_genes, "log2FoldChange"],
+                                       padj = res_OA_Mint[gse_OA_Mint_ChemSig_genes, "padj"])
+ 
+ gse_OA_Mint_ChemSig_dffilt <- gse_OA_Mint_ChemSig_df %>%
+    filter(!is.na(padj)) %>%
+    filter(padj < 0.05) %>%
+    arrange(-abs(log2FC)) %>%
+    head(10)
+  
+ gse_OA_Mint_ChemSig_dffilt <- gse_OA_Mint_ChemSig_dffilt %>%
+    mutate(
+      pathway = "Chemokine signaling pathway",
+      group = "Interaction")
+  
+  # now doing extracting and processing on male and female groups
+  # Motor proteins pathway extraction and processing because its 
+  # shared
+  gse_OA_F_MotPro_genes <- extract_genes_from_pathway(gse_OA_F, "Motor proteins")
+  
+  gse_OA_F_MotPro_valid_genes <- intersect(gse_OA_F_MotPro_genes, rownames(res_OA_F))  
+  
+  gse_OA_F_MotPro_df <- data.frame(gene = gse_OA_F_MotPro_genes,
+                                       log2FC = res_OA_F[gse_OA_F_MotPro_genes, "log2FoldChange"],
+                                       padj = res_OA_F[gse_OA_F_MotPro_genes, "padj"])
+  
+  gse_OA_F_MotPro_dffilt <- gse_OA_F_MotPro_df %>%
+    filter(!is.na(padj)) %>%
+    filter(padj < 0.05) %>%
+    arrange(-abs(log2FC)) %>%
+    head(10)
+  
+  gse_OA_F_MotPro_dffilt <- gse_OA_F_MotPro_dffilt %>%
+    mutate(
+      pathway = "Motor proteins",
+      group = "Female")
+  
+  # Cytoskeleton in muscle cells pathway extraction and processing in female group
+  gse_OA_F_NFKapB_genes <- extract_genes_from_pathway(gse_OA_F, "NF-kappa B signaling pathway")
+  
+  gse_OA_F_NFKapB_valid_genes <- intersect(gse_OA_F_NFKapB_genes, rownames(res_OA_F))  
+  
+  gse_OA_F_NFKapB_df <- data.frame(gene = gse_OA_F_NFKapB_genes,
+                                   log2FC = res_OA_F[gse_OA_F_NFKapB_genes, "log2FoldChange"],
+                                   padj = res_OA_F[gse_OA_F_NFKapB_genes, "padj"])
+  
+  gse_OA_F_NFKapB_dffilt <- gse_OA_F_NFKapB_df %>%
+    filter(!is.na(padj)) %>%
+    filter(padj < 0.05) %>%
+    arrange(-abs(log2FC)) %>%
+    head(10)
+  
+  gse_OA_F_NFKapB_dffilt <- gse_OA_F_NFKapB_dffilt %>%
+    mutate(
+      pathway = "NF-kappa B signaling pathway",
+      group = "Female")
+  
+  # Allograft rejection pathway extraction and processing in female group
+  gse_OA_F_Allo_genes <- extract_genes_from_pathway(gse_OA_F, "Allograft rejection")
+  
+  gse_OA_F_Allo_valid_genes <- intersect(gse_OA_F_Allo_genes, rownames(res_OA_F))  
+  
+  gse_OA_F_Allo_df <- data.frame(gene = gse_OA_F_Allo_genes,
+                                    log2FC = res_OA_F[gse_OA_F_Allo_genes, "log2FoldChange"],
+                                    padj = res_OA_F[gse_OA_F_Allo_genes, "padj"])
+  
+  gse_OA_F_Allo_dffilt <- gse_OA_F_Allo_df %>%
+    filter(!is.na(padj)) %>%
+    filter(padj < 0.05) %>%
+    arrange(-abs(log2FC)) %>%
+    head(10)
+  
+  gse_OA_F_Allo_dffilt <- gse_OA_F_Allo_dffilt %>%
+    mutate(
+      pathway = "Allograft rejection",
+      group = "Female")
+  
+  # Male Motor proteins pathway extraction and processing because its shared
+  gse_OA_M_MotPro_genes <- extract_genes_from_pathway(gse_OA_M, "Motor proteins")
+  
+  gse_OA_M_MotPro_valid_genes <- intersect(gse_OA_M_MotPro_genes, rownames(res_OA_M))  
+  
+  gse_OA_M_MotPro_df <- data.frame(gene = gse_OA_M_MotPro_genes,
+                                   log2FC = res_OA_M[gse_OA_M_MotPro_genes, "log2FoldChange"],
+                                   padj = res_OA_M[gse_OA_M_MotPro_genes, "padj"])
+  
+  gse_OA_M_MotPro_dffilt <- gse_OA_M_MotPro_df %>%
+    filter(!is.na(padj)) %>%
+    filter(padj < 0.05) %>%
+    arrange(-abs(log2FC)) %>%
+    head(10)
+  
+  gse_OA_M_MotPro_dffilt <- gse_OA_M_MotPro_dffilt %>%
+    mutate(
+      pathway = "Motor proteins",
+      group = "Male")
+  
+  # Male Graft-versus-host disease pathway extraction and processing
+  gse_OA_M_CorEnv_genes <- extract_genes_from_pathway(gse_OA_M, "Cornified envelope formation")
+  
+  gse_OA_M_CorEnv_valid_genes <- intersect(gse_OA_M_CorEnv_genes, rownames(res_OA_M))  
+  
+  gse_OA_M_CorEnv_df <- data.frame(gene = gse_OA_M_CorEnv_genes,
+                                   log2FC = res_OA_M[gse_OA_M_CorEnv_genes, "log2FoldChange"],
+                                   padj = res_OA_M[gse_OA_M_CorEnv_genes, "padj"])
+  
+  gse_OA_M_CorEnv_dffilt <- gse_OA_M_CorEnv_df %>%
+    filter(!is.na(padj)) %>%
+    filter(padj < 0.05) %>%
+    arrange(-abs(log2FC)) %>%
+    head(10)
+  
+  gse_OA_M_CorEnv_dffilt <- gse_OA_M_CorEnv_dffilt %>%
+    mutate(
+      pathway = "Cornified envelope formation",
+      group = "Male")
+  
+  # Male Calcium signaling pathway pathway extraction and processing
+  gse_OA_M_CalSig_genes <- extract_genes_from_pathway(gse_OA_M, "Calcium signaling pathway")
+  
+  gse_OA_M_CalSig_valid_genes <- intersect(gse_OA_M_CalSig_genes, rownames(res_OA_M))  
+  
+  gse_OA_M_CalSig_df <- data.frame(gene = gse_OA_M_CalSig_genes,
+                                   log2FC = res_OA_M[gse_OA_M_CalSig_genes, "log2FoldChange"],
+                                   padj = res_OA_M[gse_OA_M_CalSig_genes, "padj"])
+  
+  gse_OA_M_CalSig_dffilt <- gse_OA_M_CalSig_df %>%
+    filter(!is.na(padj)) %>%
+    filter(padj < 0.05) %>%
+    arrange(-abs(log2FC)) %>%
+    head(10)
+  
+  gse_OA_M_CalSig_dffilt <- gse_OA_M_CalSig_dffilt %>%
+    mutate(
+      pathway = "Calcium signaling pathway",
+      group = "Male")
+}
+
+#
+#
+#
+# now doing GO extraction
+#
+#
+#
+
+{
+  # starting with sex-interaction, doing 3 of sex-int, 2 of female, 2 of male.
+  # detection of chemical stimulus involved in B cell mediated immunity
+  # pathway extraction and processing in interactions group
+  go_OA_Mint_BMed_genes <- extract_genes_from_pathway(go_OA_Mint, "B cell mediated immunity")
+  
+  go_OA_Mint_BMed_valid_genes <- intersect(go_OA_Mint_BMed_genes, rownames(res_OA_Mint))  
+  
+  go_OA_Mint_BMed_df <- data.frame(gene = go_OA_Mint_BMed_genes,
+                                        log2FC = res_OA_Mint[go_OA_Mint_BMed_genes, "log2FoldChange"],
+                                        padj = res_OA_Mint[go_OA_Mint_BMed_genes, "padj"])
+  
+  go_OA_Mint_BMed_dffilt <- go_OA_Mint_BMed_df %>%
+    filter(!is.na(padj)) %>%
+    filter(padj < 0.05) %>%
+    arrange(-abs(log2FC)) %>%
+    head(10)
+  
+  go_OA_Mint_BMed_dffilt <- go_OA_Mint_BMed_dffilt %>%
+    mutate(
+      pathway = "B cell mediated immunity",
+      group = "Interaction")
+  
+  # immunoglobulin mediated immune response pathway extraction 
+  # and processing in interactions group
+  go_OA_Mint_ImmMed_genes <- extract_genes_from_pathway(go_OA_Mint, "immunoglobulin mediated immune response")
+  
+  go_OA_Mint_ImmMed_valid_genes <- intersect(go_OA_Mint_ImmMed_genes, rownames(res_OA_Mint))  
+  
+  go_OA_Mint_ImmMed_df <- data.frame(gene = go_OA_Mint_ImmMed_genes,
+                                   log2FC = res_OA_Mint[go_OA_Mint_ImmMed_genes, "log2FoldChange"],
+                                   padj = res_OA_Mint[go_OA_Mint_ImmMed_genes, "padj"])
+  
+  go_OA_Mint_ImmMed_dffilt <- go_OA_Mint_ImmMed_df %>%
+    filter(!is.na(padj)) %>%
+    filter(padj < 0.05) %>%
+    arrange(-abs(log2FC)) %>%
+    head(10)
+  
+  go_OA_Mint_ImmMed_dffilt <- go_OA_Mint_ImmMed_dffilt %>%
+    mutate(
+      pathway = "immunoglobulin mediated immune response",
+      group = "Interaction")
+  
+  # now doing extracting and processing on male and female groups
+  # B cell receptor signaling pathway pathway extraction and processing 
+  # because its shared
+  go_OA_F_BcellSig_genes <- extract_genes_from_pathway(go_OA_F, "B cell receptor signaling pathway")
+  
+  go_OA_F_BcellSig_valid_genes <- intersect(go_OA_F_BcellSig_genes, rownames(res_OA_F))  
+  
+  go_OA_F_BcellSig_df <- data.frame(gene = go_OA_F_BcellSig_genes,
+                                     log2FC = res_OA_F[go_OA_F_BcellSig_genes, "log2FoldChange"],
+                                     padj = res_OA_F[go_OA_F_BcellSig_genes, "padj"])
+  
+  go_OA_F_BcellSig_dffilt <- go_OA_F_BcellSig_df %>%
+    filter(!is.na(padj)) %>%
+    filter(padj < 0.05) %>%
+    arrange(-abs(log2FC)) %>%
+    head(10)
+  
+  go_OA_F_BcellSig_dffilt <- go_OA_F_BcellSig_dffilt %>%
+    mutate(
+      pathway = "B cell receptor signaling pathway",
+      group = "Female")
+  
+  # antigen processing and presentation of peptide antigen via MHC class II 
+  # pathway extraction and processing in female group
+  go_OA_F_MHCIIAntigen_genes <- extract_genes_from_pathway(go_OA_F, "antigen processing and presentation of peptide antigen via MHC class II")
+  
+  go_OA_F_MHCIIAntigen_valid_genes <- intersect(go_OA_F_MHCIIAntigen_genes, rownames(res_OA_F))  
+  
+  go_OA_F_MHCIIAntigen_df <- data.frame(gene = go_OA_F_MHCIIAntigen_genes,
+                                    log2FC = res_OA_F[go_OA_F_MHCIIAntigen_genes, "log2FoldChange"],
+                                    padj = res_OA_F[go_OA_F_MHCIIAntigen_genes, "padj"])
+  
+  go_OA_F_MHCIIAntigen_dffilt <- go_OA_F_MHCIIAntigen_df %>%
+    filter(!is.na(padj)) %>%
+    filter(padj < 0.05) %>%
+    arrange(-abs(log2FC)) %>%
+    head(10)
+  
+  go_OA_F_MHCIIAntigen_dffilt <- go_OA_F_MHCIIAntigen_dffilt %>%
+    mutate(
+      pathway = "antigen processing and presentation of peptide antigen via MHC class II",
+      group = "Female")
+  
+  # Male muscle tissue morphogenesis pathway extraction and processing
+  go_OA_M_MusTisMor_genes <- extract_genes_from_pathway(go_OA_M, "muscle tissue morphogenesis")
+  
+  go_OA_M_MusTisMor_valid_genes <- intersect(go_OA_M_MusTisMor_genes, rownames(res_OA_M))  
+  
+  go_OA_M_MusTisMor_df <- data.frame(gene = go_OA_M_MusTisMor_genes,
+                                        log2FC = res_OA_M[go_OA_M_MusTisMor_genes, "log2FoldChange"],
+                                        padj = res_OA_M[go_OA_M_MusTisMor_genes, "padj"])
+  
+  go_OA_M_MusTisMor_dffilt <- go_OA_M_MusTisMor_df %>%
+    filter(!is.na(padj)) %>%
+    filter(padj < 0.05) %>%
+    arrange(-abs(log2FC)) %>%
+    head(10)
+  
+  go_OA_M_MusTisMor_dffilt <- go_OA_M_MusTisMor_dffilt %>%
+    mutate(
+      pathway = "muscle tissue morphogenesis",
+      group = "Male")
+  
+  # Male actomyosin structure organization pathway extraction 
+  go_OA_M_ActOrg_genes <- extract_genes_from_pathway(go_OA_M, "actomyosin structure organization")
+  
+  go_OA_M_ActOrg_valid_genes <- intersect(go_OA_M_ActOrg_genes, rownames(res_OA_M))  
+  
+  go_OA_M_ActOrg_df <- data.frame(gene = go_OA_M_ActOrg_genes,
+                                     log2FC = res_OA_M[go_OA_M_ActOrg_genes, "log2FoldChange"],
+                                     padj = res_OA_M[go_OA_M_ActOrg_genes, "padj"])
+  
+  go_OA_M_ActOrg_dffilt <- go_OA_M_ActOrg_df %>%
+    filter(!is.na(padj)) %>%
+    filter(padj < 0.05) %>%
+    arrange(-abs(log2FC)) %>%
+    head(10)
+  
+  go_OA_M_ActOrg_dffilt <- go_OA_M_ActOrg_dffilt %>%
+    mutate(
+      pathway = "actomyosin structure organization",
+      group = "Male")
+}
+
+#
+#
+#
+# now doing making master dataframe of all RAest extracted genes.
+#
+#
+#
+
+OA_master_genes <- bind_rows(go_OA_Mint_BMed_dffilt, 
+                                go_OA_Mint_ImmMed_dffilt, 
+                                go_OA_F_BcellSig_dffilt, 
+                                go_OA_F_MHCIIAntigen_dffilt, 
+                                go_OA_M_MusTisMor_dffilt, 
+                                go_OA_M_ActOrg_dffilt, 
+                                gse_OA_Mint_ChemSig_dffilt, 
+                                gse_OA_F_MotPro_dffilt, 
+                                gse_OA_F_NFKapB_dffilt, 
+                                gse_OA_F_Allo_dffilt, 
+                                gse_OA_M_MotPro_dffilt, 
+                                gse_OA_M_CorEnv_dffilt, 
+                                gse_OA_M_CalSig_dffilt)
+
+OA_master_genes$symbol <- mapIds(
+  org.Hs.eg.db,
+  keys = OA_master_genes$gene,
+  column = "SYMBOL",
+  keytype = "ENTREZID",
+  multiVals = "first")
+
+OA_master_genes
+
+# table looks good, saving it.
+write.table(
+  OA_master_genes,
+  "OA_master_genes.tsv",
+  sep = "\t",
+  row.names = FALSE,
+  quote = FALSE)
+
+# ARTH KEGG enrichment and extraction -------------------------------------
+
+# KEGG extraction of female samples
+
+gse_ARTH_F <- gseKEGG(geneList = genelist_ARTH_F, organism = "hsa")
+
+dotplot(gse_ARTH_F, showCategory = 10) +
+  ggtitle("KEGG enriched Female arthralgia Pathways")
+
+# KEGG extraction of male samples
+
+gse_ARTH_M <- gseKEGG(geneList = genelist_ARTH_M, organism = "hsa")
+
+dotplot(gse_ARTH_M, showCategory = 10) +
+  ggtitle("KEGG enriched Male arthralgia  Pathways")
+
+# KEGG extraction of male and female differences
+
+gse_ARTH_Mint <- gseKEGG(geneList = genelist_ARTH_Mint, organism = "hsa")
+
+dotplot(gse_ARTH_Mint, showCategory = 10) +
+  ggtitle("KEGG enriched Sex interaction in arthralgia Pathways")
+
+# summary KEGG
+
+KEGG_ARTH_top_F <- gse_ARTH_F@result[1:15, c("Description", "p.adjust")]
+KEGG_ARTH_top_F$Group <- "Female"
+
+KEGG_ARTH_top_M <- gse_ARTH_M@result[1:15, c("Description", "p.adjust")]
+KEGG_ARTH_top_M$Group <- "Male"
+
+KEGG_ARTH_top_Mint <- gse_ARTH_Mint@result[1:15, c("Description", "p.adjust")]
+KEGG_ARTH_top_Mint$Group <- "Interaction"
+
+KEGG_ARTH_combined <- rbind(KEGG_ARTH_top_F, KEGG_ARTH_top_M, KEGG_ARTH_top_Mint)
+
+KEGG_ARTH_master_table <- KEGG_ARTH_combined %>%
+  mutate(present = TRUE) %>%
+  pivot_wider(
+    names_from = Group,
+    values_from = present,
+    values_fill = list(present = FALSE),
+    values_fn = list(present = any))
+
+mpKEGG_ARTH_cap <- paste(
+  "Figure 28. KEGG pathway enrichment dotplot of sex-specific transcriptional differences across Arhtralgia. Pathways identified via GSEA are",  
+  "displayed with statistical significance on the y-axis, dot size representing gene the logged adjusted p-value. Analysis was performed using clusterProfiler gseKEGG, organism = “hsa”",
+  "Significance thresholds: adjusted p-value < 0.05 and |log2 fold change| > 1 (DESeq2).")
+
+mpKEGG_ARTH_wrap <- paste(strwrap(mpKEGG_ARTH_cap, width = 100), collapse = "\n")
+
+ggplot(KEGG_ARTH_combined, aes(x = Group, y = Description)) +
+  geom_point(aes(size = -log10(p.adjust))) +
+  theme_bw() + labs(caption = mpKEGG_ARTH_wrap) + theme(
+    plot.caption = element_text(hjust = 0.8, size = 12))
+
+KEGG_ARTH_master_table$Category <- case_when(
+  KEGG_ARTH_master_table$Female & KEGG_ARTH_master_table$Male & !KEGG_ARTH_master_table$Interaction ~ "Shared",
+  KEGG_ARTH_master_table$Interaction ~ "Sex-differential",
+  KEGG_ARTH_master_table$Female & !KEGG_ARTH_master_table$Male ~ "Female-specific",
+  KEGG_ARTH_master_table$Male & !KEGG_ARTH_master_table$Female ~ "Male-specific",
+  TRUE ~ "Other")
+
+print(KEGG_ARTH_master_table, n = 45)
+{
+# # A tibble: 45 × 6
+# Description                                                        p.adjust Female Male  Interaction Category       
+# <chr>                                                                 <dbl> <lgl>  <lgl> <lgl>       <chr>          
+#   1 Rheumatoid arthritis                                          0.0000000102  TRUE   FALSE FALSE       Female-specific
+# 2 Viral protein interaction with cytokine and cytokine receptor 0.0000000102  TRUE   FALSE FALSE       Female-specific
+# 3 Cytoskeleton in muscle cells                                  0.0000000102  TRUE   FALSE FALSE       Female-specific
+# 4 Toll-like receptor signaling pathway                          0.0000000234  TRUE   FALSE FALSE       Female-specific
+# 5 Cardiac muscle contraction                                    0.0000000234  TRUE   FALSE FALSE       Female-specific
+# 6 Motor proteins                                                0.0000000274  TRUE   FALSE FALSE       Female-specific
+# 7 Leishmaniasis                                                 0.0000000654  TRUE   FALSE FALSE       Female-specific
+# 8 Adrenergic signaling in cardiomyocytes                        0.0000000883  TRUE   FALSE FALSE       Female-specific
+# 9 Hypertrophic cardiomyopathy                                   0.000000122   TRUE   FALSE FALSE       Female-specific
+# 10 Intestinal immune network for IgA production                  0.000000138   TRUE   FALSE FALSE       Female-specific
+# 11 Ribosome biogenesis in eukaryotes                             0.000000220   TRUE   FALSE FALSE       Female-specific
+# 12 TNF signaling pathway                                         0.000000525   TRUE   FALSE FALSE       Female-specific
+# 13 NF-kappa B signaling pathway                                  0.000000682   TRUE   FALSE FALSE       Female-specific
+# 14 Dilated cardiomyopathy                                        0.00000119    TRUE   FALSE FALSE       Female-specific
+# 15 Allograft rejection                                           0.00000125    TRUE   FALSE FALSE       Female-specific
+# 16 Cytoskeleton in muscle cells                                  0.0000000117  FALSE  TRUE  FALSE       Male-specific  
+# 17 Motor proteins                                                0.0000000117  FALSE  TRUE  FALSE       Male-specific  
+# 18 Hypertrophic cardiomyopathy                                   0.0000000117  FALSE  TRUE  FALSE       Male-specific  
+# 19 Dilated cardiomyopathy                                        0.0000000382  FALSE  TRUE  FALSE       Male-specific  
+# 20 Cardiac muscle contraction                                    0.0000000382  FALSE  TRUE  FALSE       Male-specific  
+# 21 Cornified envelope formation                                  0.00000108    FALSE  TRUE  FALSE       Male-specific  
+# 22 Lysosome                                                      0.0000444     FALSE  TRUE  FALSE       Male-specific  
+# 23 Arrhythmogenic right ventricular cardiomyopathy               0.000139      FALSE  TRUE  FALSE       Male-specific  
+# 24 Adrenergic signaling in cardiomyocytes                        0.000139      FALSE  TRUE  FALSE       Male-specific  
+# 25 Viral myocarditis                                             0.00323       FALSE  TRUE  FALSE       Male-specific  
+# 26 Systemic lupus erythematosus                                  0.00431       FALSE  TRUE  FALSE       Male-specific  
+# 27 Legionellosis                                                 0.00495       FALSE  TRUE  FALSE       Male-specific  
+# 28 Calcium signaling pathway                                     0.0130        FALSE  TRUE  FALSE       Male-specific  
+# 29 Phagosome                                                     0.0201        FALSE  TRUE  FALSE       Male-specific  
+# 30 Leishmaniasis                                                 0.0371        FALSE  TRUE  FALSE       Male-specific  
+# 31 Cytoskeleton in muscle cells                                  0.00000000852 FALSE  FALSE TRUE        Sex-differenti…
+# 32 Hypertrophic cardiomyopathy                                   0.00000000852 FALSE  FALSE TRUE        Sex-differenti…
+# 33 Dilated cardiomyopathy                                        0.00000000852 FALSE  FALSE TRUE        Sex-differenti…
+# 34 Motor proteins                                                0.00000000852 FALSE  FALSE TRUE        Sex-differenti…
+# 35 Cardiac muscle contraction                                    0.0000000999  FALSE  FALSE TRUE        Sex-differenti…
+# 36 Adrenergic signaling in cardiomyocytes                        0.0000000999  FALSE  FALSE TRUE        Sex-differenti…
+# 37 Viral protein interaction with cytokine and cytokine receptor 0.00000717    FALSE  FALSE TRUE        Sex-differenti…
+# 38 Chemokine signaling pathway                                   0.00000788    FALSE  FALSE TRUE        Sex-differenti…
+# 39 Arrhythmogenic right ventricular cardiomyopathy               0.0000124     FALSE  FALSE TRUE        Sex-differenti…
+}
+# GO extraction of female samples
+
+go_ARTH_F <- gseGO(
+  geneList = genelist_ARTH_F,
+  OrgDb = org.Hs.eg.db,
+  keyType = "ENTREZID",
+  ont = "BP", 
+  pAdjustMethod = "BH",
+  pvalueCutoff = 0.05)
+
+dotplot(go_ARTH_F, showCategory = 10) +
+  ggtitle("10 most significant GO enriched Female arthralgia Pathways")
+
+# GO extraction of male samples
+
+go_ARTH_M <- gseGO(
+  geneList = genelist_ARTH_M,
+  OrgDb = org.Hs.eg.db,
+  keyType = "ENTREZID",
+  ont = "BP", 
+  pAdjustMethod = "BH",
+  pvalueCutoff = 0.05)
+
+dotplot(go_ARTH_M, showCategory = 10) +
+  ggtitle("10 most significant GO enriched male arthralgia Pathways")
+
+# GO extraction of male and female differences
+
+go_ARTH_Mint <- gseGO(
+  geneList = genelist_ARTH_Mint,
+  OrgDb = org.Hs.eg.db,
+  keyType = "ENTREZID",
+  ont = "BP", 
+  pAdjustMethod = "BH",
+  pvalueCutoff = 0.05)
+
+dotplot(go_ARTH_Mint, showCategory = 10) +
+  ggtitle("10 most significant GO enriched sex-difference arthralgia Pathways")
+
+# summary GO
+
+GO_ARTH_top_F <- go_ARTH_F@result[1:15, c("Description", "p.adjust")]
+GO_ARTH_top_F$Group <- "Female"
+
+GO_ARTH_top_M <- go_ARTH_M@result[1:15, c("Description", "p.adjust")]
+GO_ARTH_top_M$Group <- "Male"
+
+GO_ARTH_top_Mint <- go_ARTH_Mint@result[1:15, c("Description", "p.adjust")]
+GO_ARTH_top_Mint$Group <- "Interaction"
+
+GO_ARTH_combined <- rbind(GO_ARTH_top_F, GO_ARTH_top_M, GO_ARTH_top_Mint)
+
+GO_ARTH_master_table <- GO_ARTH_combined %>%
+  mutate(present = TRUE) %>%
+  pivot_wider(
+    names_from = Group,
+    values_from = present,
+    values_fill = list(present = FALSE),
+    values_fn = list(present = any))
+
+mpGO_ARTH_cap <- paste(
+  "Figure 29. GO pathway enrichment dotplot of sex-specific transcriptional differences across Arhtralgia. Pathways identified via GSEA are",  
+  "displayed with statistical significance on the y-axis, dot size representing gene the logged adjusted p-value. Analysis was performed using clusterProfiler gseKEGG, organism = “hsa”",
+  "Significance thresholds: adjusted p-value < 0.05 and |log2 fold change| > 1 (DESeq2).")
+
+mpGO_ARTH_wrap <- paste(strwrap(mpGO_ARTH_cap, width = 100), collapse = "\n")
+
+ggplot(GO_ARTH_combined, aes(x = Group, y = Description)) +
+  geom_point(aes(size = -log10(p.adjust))) +
+  theme_bw() + labs(caption = mpGO_ARTH_wrap) + theme(
+    plot.caption = element_text(hjust = 0.8, size = 12))
+
+GO_ARTH_master_table$Category <- case_when(
+  GO_ARTH_master_table$Female & GO_OA_master_table$Male & !GO_ARTH_master_table$Interaction ~ "Shared",
+  GO_ARTH_master_table$Interaction ~ "Sex-differential",
+  GO_ARTH_master_table$Female & !GO_ARTH_master_table$Male ~ "Female-specific",
+  GO_ARTH_master_table$Male & !GO_ARTH_master_table$Female ~ "Male-specific",
+  TRUE ~ "Other")
+
+print(GO_ARTH_master_table, n = 45)
+{
+# A tibble: 45 × 6
+# Description                                                               p.adjust Female Male  Interaction Category
+# <chr>                                                                        <dbl> <lgl>  <lgl> <lgl>       <chr>   
+#   1 B cell receptor signaling pathway                                          1.24e-8 TRUE   FALSE FALSE       Female-…
+# 2 antimicrobial humoral immune response mediated by antimicrobial peptide    1.24e-8 TRUE   FALSE FALSE       Female-…
+# 3 granulocyte chemotaxis                                                     1.24e-8 TRUE   FALSE FALSE       Female-…
+# 4 myofibril assembly                                                         1.24e-8 TRUE   FALSE FALSE       Female-…
+# 5 sarcomere organization                                                     1.24e-8 TRUE   FALSE FALSE       Female-…
+# 6 regulation of cell killing                                                 1.24e-8 TRUE   FALSE FALSE       Female-…
+# 7 leukocyte mediated cytotoxicity                                            1.24e-8 TRUE   FALSE FALSE       Female-…
+# 8 skeletal muscle contraction                                                1.24e-8 TRUE   FALSE FALSE       Female-…
+# 9 granulocyte migration                                                      1.24e-8 TRUE   FALSE FALSE       Female-…
+# 10 striated muscle cell development                                           1.24e-8 TRUE   FALSE FALSE       Female-…
+# 11 musculoskeletal movement                                                   1.24e-8 TRUE   FALSE FALSE       Female-…
+# 12 multicellular organismal movement                                          1.24e-8 TRUE   FALSE FALSE       Female-…
+# 13 muscle cell development                                                    1.24e-8 TRUE   FALSE FALSE       Female-…
+# 14 positive regulation of striated muscle cell differentiation                1.24e-8 TRUE   FALSE FALSE       Female-…
+# 15 regulation of myotube differentiation                                      1.24e-8 TRUE   FALSE FALSE       Female-…
+# 16 cytoplasmic translation                                                    7.04e-8 FALSE  TRUE  FALSE       Male-sp…
+# 17 mitochondrial translation                                                  7.04e-8 FALSE  TRUE  FALSE       Male-sp…
+# 18 mitochondrial gene expression                                              7.04e-8 FALSE  TRUE  FALSE       Male-sp…
+# 19 skeletal muscle tissue development                                         7.04e-8 FALSE  TRUE  FALSE       Male-sp…
+# 20 muscle organ development                                                   7.04e-8 FALSE  TRUE  FALSE       Male-sp…
+# 21 striated muscle cell differentiation                                       7.04e-8 FALSE  TRUE  FALSE       Male-sp…
+# 22 cell fate commitment                                                       7.04e-8 FALSE  TRUE  FALSE       Male-sp…
+# 23 muscle cell differentiation                                                7.04e-8 FALSE  TRUE  FALSE       Male-sp…
+# 24 muscle tissue development                                                  7.04e-8 FALSE  TRUE  FALSE       Male-sp…
+# 25 muscle system process                                                      8.77e-8 FALSE  TRUE  FALSE       Male-sp…
+# 26 striated muscle tissue development                                         1.01e-7 FALSE  TRUE  FALSE       Male-sp…
+# 27 skeletal muscle organ development                                          1.51e-7 FALSE  TRUE  FALSE       Male-sp…
+# 28 positive regulation of striated muscle cell differentiation                1.56e-7 FALSE  TRUE  FALSE       Male-sp…
+# 29 positive regulation of muscle cell differentiation                         1.56e-7 FALSE  TRUE  FALSE       Male-sp…
+# 30 ribosomal small subunit biogenesis                                         2.01e-7 FALSE  TRUE  FALSE       Male-sp…
+# 31 immunoglobulin mediated immune response                                    1.48e-8 FALSE  FALSE TRUE        Sex-dif…
+# 32 B cell mediated immunity                                                   1.48e-8 FALSE  FALSE TRUE        Sex-dif…
+# 33 lymphocyte mediated immunity                                               1.48e-8 FALSE  FALSE TRUE        Sex-dif…
+# 34 adaptive immune response based on somatic recombination of immune recept…  1.48e-8 FALSE  FALSE TRUE        Sex-dif…
+# 35 leukocyte mediated immunity                                                1.48e-8 FALSE  FALSE TRUE        Sex-dif…
+# 36 myofibril assembly                                                         1.48e-8 FALSE  FALSE TRUE        Sex-dif…
+# 37 antigen receptor-mediated signaling pathway                                1.48e-8 FALSE  FALSE TRUE        Sex-dif…
+# 38 B cell receptor signaling pathway                                          1.48e-8 FALSE  FALSE TRUE        Sex-dif…
+# 39 cellular component assembly involved in morphogenesis                      1.48e-8 FALSE  FALSE TRUE        Sex-dif…
+}
+
+# KEGG extraction
+
+
+{
+# Th17 cell differentiation pathway extraction and processing in interactions group
+gse_ARTH_Mint_Th17Diff_genes <- extract_genes_from_pathway(gse_ARTH_Mint, "Th17 cell differentiation")
+
+gse_ARTH_Mint_Th17Diffg_valid_genes <- intersect(gse_ARTH_Mint_Th17Diff_genes, rownames(res_ARTH_Mint))  
+
+gse_ARTH_Mint_Th17Diff_df <- data.frame(gene = gse_ARTH_Mint_Th17Diff_genes,
+                                     log2FC = res_ARTH_Mint[gse_ARTH_Mint_Th17Diff_genes, "log2FoldChange"],
+                                     padj = res_ARTH_Mint[gse_ARTH_Mint_Th17Diff_genes, "padj"])
+
+gse_ARTH_Mint_Th17Diff_dffilt <- gse_ARTH_Mint_Th17Diff_df %>%
+  filter(!is.na(padj)) %>%
+  filter(padj < 0.05) %>%
+  arrange(-abs(log2FC)) %>%
+  head(10)
+
+gse_ARTH_Mint_Th17Diff_dffilt <- gse_ARTH_Mint_Th17Diff_dffilt %>%
+  mutate(
+    pathway = "Th17 cell differentiation",
+    group = "Interaction")
+
+# now doing extracting and processing on male and female groups
+# T cell receptor signaling pathway extraction and processing because its 
+# shared
+gse_ARTH_Mint_TCellSig_genes <- extract_genes_from_pathway(gse_ARTH_Mint, "T cell receptor signaling pathway")
+
+gse_ARTH_Mint_TCellSig_valid_genes <- intersect(gse_ARTH_Mint_TCellSig_genes, rownames(res_ARTH_Mint))  
+
+gse_ARTH_Mint_TCellSig_df <- data.frame(gene = gse_ARTH_Mint_TCellSig_genes,
+                                        log2FC = res_ARTH_Mint[gse_ARTH_Mint_TCellSig_genes, "log2FoldChange"],
+                                        padj = res_ARTH_Mint[gse_ARTH_Mint_TCellSig_genes, "padj"])
+
+gse_ARTH_Mint_TCellSig_dffilt <- gse_ARTH_Mint_TCellSig_df %>%
+  filter(!is.na(padj)) %>%
+  filter(padj < 0.05) %>%
+  arrange(-abs(log2FC)) %>%
+  head(10)
+
+gse_ARTH_Mint_TCellSig_dffilt <- gse_ARTH_Mint_TCellSig_dffilt %>%
+  mutate(
+    pathway = "T cell receptor signaling pathway",
+    group = "Interaction")
+
+# Cytoskeleton in muscle cells pathway extraction and processing in female group
+gse_ARTH_Mint_ChemSig_genes <- extract_genes_from_pathway(gse_ARTH_Mint, "Chemokine signaling pathway")
+
+gse_ARTH_Mint_ChemSig_valid_genes <- intersect(gse_ARTH_Mint_ChemSig_genes, rownames(res_ARTH_Mint))  
+
+gse_ARTH_Mint_ChemSig_df <- data.frame(gene = gse_ARTH_Mint_ChemSig_genes,
+                                        log2FC = res_ARTH_Mint[gse_ARTH_Mint_ChemSig_genes, "log2FoldChange"],
+                                        padj = res_ARTH_Mint[gse_ARTH_Mint_ChemSig_genes, "padj"])
+
+gse_ARTH_Mint_ChemSig_dffilt <- gse_ARTH_Mint_ChemSig_df %>%
+  filter(!is.na(padj)) %>%
+  filter(padj < 0.05) %>%
+  arrange(-abs(log2FC)) %>%
+  head(10)
+
+gse_ARTH_Mint_ChemSig_dffilt <- gse_ARTH_Mint_ChemSig_dffilt %>%
+  mutate(
+    pathway = "Chemokine signaling pathway",
+    group = "Interaction")
+
+# Systemic lupus erythematosus pathway extraction and processing in female group
+gse_ARTH_F_SysLup_genes <- extract_genes_from_pathway(gse_ARTH_F, "Systemic lupus erythematosus")
+
+gse_ARTH_F_SysLup_valid_genes <- intersect(gse_ARTH_F_SysLup_genes, rownames(res_ARTH_F))  
+
+gse_ARTH_F_SysLup_df <- data.frame(gene = gse_ARTH_F_SysLup_genes,
+                                       log2FC = res_ARTH_F[gse_ARTH_F_SysLup_genes, "log2FoldChange"],
+                                       padj = res_ARTH_F[gse_ARTH_F_SysLup_genes, "padj"])
+
+gse_ARTH_F_SysLup_dffilt <- gse_ARTH_F_SysLup_df %>%
+  filter(!is.na(padj)) %>%
+  filter(padj < 0.05) %>%
+  arrange(-abs(log2FC)) %>%
+  head(10)
+
+gse_ARTH_F_SysLup_dffilt <- gse_ARTH_F_SysLup_dffilt %>%
+  mutate(
+    pathway = "Systemic lupus erythematosus",
+    group = "Female")
+
+# Autoimmune thyroid disease pathway extraction and processing in female group
+gse_ARTH_F_ThyDis_genes <- extract_genes_from_pathway(gse_ARTH_F, "Autoimmune thyroid disease")
+
+gse_ARTH_F_ThyDis_valid_genes <- intersect(gse_ARTH_F_ThyDis_genes, rownames(res_ARTH_F))  
+
+gse_ARTH_F_ThyDis_df <- data.frame(gene = gse_ARTH_F_ThyDis_genes,
+                                   log2FC = res_ARTH_F[gse_ARTH_F_ThyDis_genes, "log2FoldChange"],
+                                   padj = res_ARTH_F[gse_ARTH_F_ThyDis_genes, "padj"])
+
+gse_ARTH_F_ThyDis_dffilt <- gse_ARTH_F_ThyDis_df %>%
+  filter(!is.na(padj)) %>%
+  filter(padj < 0.05) %>%
+  arrange(-abs(log2FC)) %>%
+  head(10)
+
+gse_ARTH_F_ThyDis_dffilt <- gse_ARTH_F_ThyDis_dffilt %>%
+  mutate(
+    pathway = "Autoimmune thyroid disease",
+    group = "Female")
+
+# Allograft rejection pathway extraction and processing in female group
+gse_ARTH_F_Allo_genes <- extract_genes_from_pathway(gse_ARTH_F, "Allograft rejection")
+
+gse_ARTH_F_Allo_valid_genes <- intersect(gse_ARTH_F_Allo_genes, rownames(res_ARTH_F))  
+
+gse_ARTH_F_Allo_df <- data.frame(gene = gse_ARTH_F_Allo_genes,
+                                   log2FC = res_ARTH_F[gse_ARTH_F_Allo_genes, "log2FoldChange"],
+                                   padj = res_ARTH_F[gse_ARTH_F_Allo_genes, "padj"])
+
+gse_ARTH_F_Allo_dffilt <- gse_ARTH_F_Allo_df %>%
+  filter(!is.na(padj)) %>%
+  filter(padj < 0.05) %>%
+  arrange(-abs(log2FC)) %>%
+  head(10)
+
+gse_ARTH_F_Allo_dffilt <- gse_ARTH_F_Allo_dffilt %>%
+  mutate(
+    pathway = "Allograft rejection",
+    group = "Female")
+
+# Male Systemic lupus erythematosus pathway extraction and processing
+gse_ARTH_M_SysLup_genes <- extract_genes_from_pathway(gse_ARTH_M, "Systemic lupus erythematosus")
+
+gse_ARTH_M_SysLup_valid_genes <- intersect(gse_ARTH_M_SysLup_genes, rownames(res_ARTH_M))  
+
+gse_ARTH_M_SysLup_df <- data.frame(gene = gse_ARTH_M_SysLup_genes,
+                                 log2FC = res_ARTH_M[gse_ARTH_M_SysLup_genes, "log2FoldChange"],
+                                 padj = res_ARTH_M[gse_ARTH_M_SysLup_genes, "padj"])
+
+gse_ARTH_M_SysLup_dffilt <- gse_ARTH_M_SysLup_df %>%
+  filter(!is.na(padj)) %>%
+  filter(padj < 0.05) %>%
+  arrange(-abs(log2FC)) %>%
+  head(10)
+
+gse_ARTH_M_SysLup_dffilt <- gse_ARTH_M_SysLup_dffilt %>%
+  mutate(
+    pathway = "Systemic lupus erythematosus",
+    group = "Male")
+
+# Male Neutrophil extracellular trap formation pathway extraction and processing
+gse_ARTH_M_NEFT_genes <- extract_genes_from_pathway(gse_ARTH_M, "Neutrophil extracellular trap formation")
+
+gse_ARTH_M_NEFT_valid_genes <- intersect(gse_ARTH_M_NEFT_genes, rownames(res_ARTH_M))  
+
+gse_ARTH_M_NEFT_df <- data.frame(gene = gse_ARTH_M_NEFT_genes,
+                                   log2FC = res_ARTH_M[gse_ARTH_M_NEFT_genes, "log2FoldChange"],
+                                   padj = res_ARTH_M[gse_ARTH_M_NEFT_genes, "padj"])
+
+gse_ARTH_M_NEFT_dffilt <- gse_ARTH_M_NEFT_df %>%
+  filter(!is.na(padj)) %>%
+  filter(padj < 0.05) %>%
+  arrange(-abs(log2FC)) %>%
+  head(10)
+
+gse_ARTH_M_NEFT_dffilt <- gse_ARTH_M_NEFT_dffilt %>%
+  mutate(
+    pathway = "Neutrophil extracellular trap formation",
+    group = "Male")
+
+# Male Calcium signaling pathway pathway extraction and processing
+gse_ARTH_M_CalSig_genes <- extract_genes_from_pathway(gse_ARTH_M, "Calcium signaling pathway")
+
+gse_ARTH_M_CalSig_valid_genes <- intersect(gse_ARTH_M_CalSig_genes, rownames(res_ARTH_M))  
+
+gse_ARTH_M_CalSig_df <- data.frame(gene = gse_ARTH_M_CalSig_genes,
+                                 log2FC = res_ARTH_M[gse_ARTH_M_CalSig_genes, "log2FoldChange"],
+                                 padj = res_ARTH_M[gse_ARTH_M_CalSig_genes, "padj"])
+
+gse_ARTH_M_CalSig_dffilt <- gse_ARTH_M_CalSig_df %>%
+  filter(!is.na(padj)) %>%
+  filter(padj < 0.05) %>%
+  arrange(-abs(log2FC)) %>%
+  head(10)
+
+gse_ARTH_M_CalSig_dffilt <- gse_ARTH_M_CalSig_dffilt %>%
+  mutate(
+    pathway = "Calcium signaling pathway",
+    group = "Male")
+
+}
+
+#
+#
+#
+# now doing GO extraction
+#
+#
+#
+
+{
+  # starting with sex-interaction, doing 3 of sex-int, 2 of female, 2 of male.
+  # lymphocyte mediated immunity
+  # pathway extraction and processing in interactions group
+  go_ARTH_Mint_LymMed_genes <- extract_genes_from_pathway(go_ARTH_Mint, "lymphocyte mediated immunity")
+  
+  go_ARTH_Mint_LymMed_valid_genes <- intersect(go_ARTH_Mint_LymMed_genes, rownames(res_ARTH_Mint))  
+  
+  go_ARTH_Mint_LymMed_df <- data.frame(gene = go_ARTH_Mint_LymMed_genes,
+                                          log2FC = res_ARTH_Mint[go_ARTH_Mint_LymMed_genes, "log2FoldChange"],
+                                          padj = res_ARTH_Mint[go_ARTH_Mint_LymMed_genes, "padj"])
+  
+  go_ARTH_Mint_LymMed_dffilt <- go_ARTH_Mint_LymMed_df %>%
+    filter(!is.na(padj)) %>%
+    filter(padj < 0.05) %>%
+    arrange(-abs(log2FC)) %>%
+    head(10)
+  
+  go_ARTH_Mint_LymMed_dffilt <- go_ARTH_Mint_LymMed_dffilt %>%
+    mutate(
+      pathway = "lymphocyte mediated immunity",
+      group = "Interaction")
+  
+  # immunoglobulin mediated immune response pathway extraction 
+  # and processing in interactions group
+  go_ARTH_Mint_ImmMed_genes <- extract_genes_from_pathway(go_ARTH_Mint, "immunoglobulin mediated immune response")
+  
+  go_ARTH_Mint_ImmMed_valid_genes <- intersect(go_ARTH_Mint_ImmMed_genes, rownames(res_ARTH_Mint))  
+  
+  go_ARTH_Mint_ImmMed_df <- data.frame(gene = go_ARTH_Mint_ImmMed_genes,
+                                       log2FC = res_ARTH_Mint[go_ARTH_Mint_ImmMed_genes, "log2FoldChange"],
+                                       padj = res_ARTH_Mint[go_ARTH_Mint_ImmMed_genes, "padj"])
+  
+  go_ARTH_Mint_ImmMed_dffilt <- go_ARTH_Mint_ImmMed_df %>%
+    filter(!is.na(padj)) %>%
+    filter(padj < 0.05) %>%
+    arrange(-abs(log2FC)) %>%
+    head(10)
+  
+  go_ARTH_Mint_ImmMed_dffilt <- go_ARTH_Mint_ImmMed_dffilt %>%
+    mutate(
+      pathway = "immunoglobulin mediated immune response",
+      group = "Interaction")
+  
+  # now doing extracting and processing on male and female groups
+  # positive regulation of striated muscle cell differentiation pathway 
+  # extraction and processing because its shared
+  go_ARTH_F_PRSMCD_genes <- extract_genes_from_pathway(go_ARTH_F, "positive regulation of striated muscle cell differentiation")
+  
+  go_ARTH_F_PRSMCD_valid_genes <- intersect(go_ARTH_F_PRSMCD_genes, rownames(res_ARTH_F))  
+  
+  go_ARTH_F_PRSMCD_df <- data.frame(gene = go_ARTH_F_PRSMCD_genes,
+                                    log2FC = res_ARTH_F[go_ARTH_F_PRSMCD_genes, "log2FoldChange"],
+                                    padj = res_ARTH_F[go_ARTH_F_PRSMCD_genes, "padj"])
+  
+  go_ARTH_F_PRSMCD_dffilt <- go_ARTH_F_PRSMCD_df %>%
+    filter(!is.na(padj)) %>%
+    filter(padj < 0.05) %>%
+    arrange(-abs(log2FC)) %>%
+    head(10)
+  
+  go_ARTH_F_PRSMCD_dffilt <- go_ARTH_F_PRSMCD_dffilt %>%
+    mutate(
+      pathway = "positive regulation of striated muscle cell differentiation",
+      group = "Female")
+  
+  # regulation of cell killing 
+  # pathway extraction and processing in female group
+  go_ARTH_F_RegCellKill_genes <- extract_genes_from_pathway(go_ARTH_F, "regulation of cell killing")
+  
+  go_ARTH_F_RegCellKill_valid_genes <- intersect(go_ARTH_F_RegCellKill_genes, rownames(res_ARTH_F))  
+  
+  go_ARTH_F_RegCellKill_df <- data.frame(gene = go_ARTH_F_RegCellKill_genes,
+                                    log2FC = res_ARTH_F[go_ARTH_F_RegCellKill_genes, "log2FoldChange"],
+                                    padj = res_ARTH_F[go_ARTH_F_RegCellKill_genes, "padj"])
+  
+  go_ARTH_F_RegCellKill_dffilt <- go_ARTH_F_RegCellKill_df %>%
+    filter(!is.na(padj)) %>%
+    filter(padj < 0.05) %>%
+    arrange(-abs(log2FC)) %>%
+    head(10)
+  
+  go_ARTH_F_RegCellKill_dffilt <- go_ARTH_F_RegCellKill_dffilt %>%
+    mutate(
+      pathway = "regulation of cell killing",
+      group = "Female")
+  
+  # Male positive regulation of striated muscle cell differentiation pathway
+  # extraction and processing
+  go_ARTH_M_PRSMCD_genes <- extract_genes_from_pathway(go_ARTH_M, "positive regulation of striated muscle cell differentiation")
+  
+  go_ARTH_M_PRSMCD_valid_genes <- intersect(go_ARTH_M_PRSMCD_genes, rownames(res_ARTH_M))  
+  
+  go_ARTH_M_PRSMCD_df <- data.frame(gene = go_ARTH_M_PRSMCD_genes,
+                                         log2FC = res_ARTH_M[go_ARTH_M_PRSMCD_genes, "log2FoldChange"],
+                                         padj = res_ARTH_M[go_ARTH_M_PRSMCD_genes, "padj"])
+  
+  go_ARTH_M_PRSMCD_dffilt <- go_ARTH_M_PRSMCD_df %>%
+    filter(!is.na(padj)) %>%
+    filter(padj < 0.05) %>%
+    arrange(-abs(log2FC)) %>%
+    head(10)
+  
+  go_ARTH_M_PRSMCD_dffilt <- go_ARTH_M_PRSMCD_dffilt %>%
+    mutate(
+      pathway = "positive regulation of striated muscle cell differentiation",
+      group = "Male")
+  
+  # Male cell fate commitment pathway extraction 
+  go_ARTH_M_CellFate_genes <- extract_genes_from_pathway(go_ARTH_M, "cell fate commitment")
+  
+  go_ARTH_M_CellFate_valid_genes <- intersect(go_ARTH_M_CellFate_genes, rownames(res_ARTH_M))  
+  
+  go_ARTH_M_CellFate_df <- data.frame(gene = go_ARTH_M_CellFate_genes,
+                                    log2FC = res_ARTH_M[go_ARTH_M_CellFate_genes, "log2FoldChange"],
+                                    padj = res_ARTH_M[go_ARTH_M_CellFate_genes, "padj"])
+  
+  go_ARTH_M_CellFate_dffilt <- go_ARTH_M_CellFate_df %>%
+    filter(!is.na(padj)) %>%
+    filter(padj < 0.05) %>%
+    arrange(-abs(log2FC)) %>%
+    head(10)
+  
+  go_ARTH_M_CellFate_dffilt <- go_ARTH_M_CellFate_dffilt %>%
+    mutate(
+      pathway = "cell fate commitment",
+      group = "Male")
+}
+
+#
+#
+#
+# now doing making master dataframe of all RAest extracted genes.
+#
+#
+#
+
+ARTH_master_genes <- bind_rows(go_ARTH_M_CellFate_dffilt, 
+                             go_ARTH_M_PRSMCD_dffilt, 
+                             go_ARTH_F_RegCellKill_dffilt, 
+                             go_ARTH_F_PRSMCD_dffilt, 
+                             go_ARTH_Mint_ImmMed_dffilt, 
+                             go_ARTH_Mint_LymMed_dffilt, 
+                             gse_ARTH_M_CalSig_dffilt, 
+                             gse_ARTH_M_NEFT_dffilt, 
+                             gse_ARTH_M_SysLup_dffilt, 
+                             gse_ARTH_F_Allo_dffilt, 
+                             gse_ARTH_F_ThyDis_dffilt, 
+                             gse_ARTH_F_SysLup_dffilt, 
+                             gse_ARTH_Mint_ChemSig_dffilt, 
+                             gse_ARTH_Mint_TCellSig_dffilt, 
+                             gse_ARTH_Mint_Th17Diff_dffilt)
+
+ARTH_master_genes$symbol <- mapIds(
+  org.Hs.eg.db,
+  keys = ARTH_master_genes$gene,
+  column = "SYMBOL",
+  keytype = "ENTREZID",
+  multiVals = "first")
+
+ARTH_master_genes
+
+# table looks good, saving it.
+write.table(
+  ARTH_master_genes,
+  "ARTH_master_genes.tsv",
+  sep = "\t",
+  row.names = FALSE,
+  quote = FALSE)
